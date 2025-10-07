@@ -31,4 +31,14 @@ spec:
   values:
     grafana:
       adminPassword: silas
+      ingress:
+        enabled: true
+        ingressClassName: traefik
 
+        hosts:
+          - grs.silasgroskreutz.com
+
+        tls:
+          - secretName: grafana-tls-secret
+            hosts:
+              - grs.silasgroskreutz.com
