@@ -4,3 +4,4 @@ namespace: linkding
 resources: 
   - ../../base/audiobookshelf
   - secret.yaml
+  - cloudflare.yaml
