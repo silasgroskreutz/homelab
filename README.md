@@ -1,2 +1,2 @@
 # homelab
-This is my homelab for K8S deployments and works in progress. 
+Self-hosted Kubernetes cluster simulating production environments, with Flux for GitOps and Grafana for monitoring 
