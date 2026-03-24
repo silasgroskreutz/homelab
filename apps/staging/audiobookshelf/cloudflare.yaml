@@ -55,18 +55,14 @@ spec:
           - key: config.yaml
             path: config.yaml
 ---
-# This ConfigMap is just a way to define the cloudflared config.yaml file in k8s.
-# It's useful to define it in k8s, rather than as a stand-alone .yaml file, because
-# this lets you use various k8s templating solutions (e.g. Helm charts) to
-# parameterize your config, instead of just using string literals.
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cloudflared
 data:
-  config.yaml: 
+  config.yaml: |
     # Name of the tunnel you want to run
-    
     tunnel: audiobooks
 
     credentials-file: /etc/cloudflared/creds/credentials.json
@@ -79,10 +75,9 @@ data:
     - hostname: audiobooks.silasgroskreutz.com
       service: http://audiobookshelf:3005
 
-    # This rule sends traffic to the built-in hello-world HTTP server. This can help debug connectivity
-    # issues. If hello.example.com resolves and tunnel.example.com does not, then the problem is
-    # in the connection from cloudflared to your local service, not from the internet to cloudflared.
+    # This rule sends traffic to the built-in hello-world HTTP server...
     - hostname: hello.example.com
       service: hello_world
-    # This rule matches any traffic which didn't match a previous rule, and responds with HTTP 404.
+
+    # This rule matches any traffic which didn't match a previous rule...
     - service: http_status:404
