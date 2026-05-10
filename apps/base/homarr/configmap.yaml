@@ -5,3 +5,4 @@ metadata:
   namespace: homarr
 data:
   PORT: "3000"
+  SECRET_ENCRYPTION_KEY: "ff649462e72e59f52f088fbe971e05b072329d22d400f76126385d6f00de74e3"
