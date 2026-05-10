@@ -19,7 +19,7 @@ spec:
         runAsGroup: 1000
       containers:
         - name: homarr
-          image: ghcr.io/kelores/homarr:latest
+          image: ghcr.io/homarr-labs/homarr:latest
           envFrom:
             - configMapRef:
                 name: homarr-configmap
