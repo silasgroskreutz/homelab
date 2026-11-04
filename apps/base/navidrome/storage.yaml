@@ -8,14 +8,10 @@ spec:
   resources:
     requests:
       storage: 1Gi
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: navidrome-music-pvc
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
+  # NOTE: the music library is mounted from the NAS via hostPath (/mnt/nas/music),
+  # not from a PVC. The former navidrome-music-pvc was orphaned (10Gi reserved,
+  # nothing referenced it) and has been removed.
+  # NOTE: navidrome-data-pvc requests only 1Gi while ND_IMAGECACHESIZE=4GB and
+  # ND_TRANSCODINGCACHESIZE=24G are configured. The local-path provisioner does
+  # not enforce PVC quotas, so this is harmless today. If this ever moves to a
+  # storage class that enforces limits, expand the PVC FIRST.
