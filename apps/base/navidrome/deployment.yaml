@@ -31,9 +31,9 @@ spec:
             - name: ND_SESSIONTIMEOUT
               value: 24h
             - name: ND_IMAGECACHESIZE
-              value: 4GB
+              value: "4GB"
             - name: ND_TRANSCODINGCACHESIZE
-              value: 1GB
+              value: "24G"
           volumeMounts:
             - name: navidrome-data
               mountPath: /data
