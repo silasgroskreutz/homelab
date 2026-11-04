@@ -30,6 +30,10 @@ spec:
               value: 1h
             - name: ND_SESSIONTIMEOUT
               value: 24h
+            - name: ND_IMAGECACHESIZE
+              value: 4GB
+            - name: ND_TRANSCODINGCACHESIZE
+              value: 1GB
           volumeMounts:
             - name: navidrome-data
               mountPath: /data
@@ -41,5 +45,6 @@ spec:
           persistentVolumeClaim:
             claimName: navidrome-data-pvc
         - name: navidrome-music
-          persistentVolumeClaim:
-            claimName: navidrome-music-pvc
+          hostPath:
+            path: /mnt/nas/music
+            type: Directory
