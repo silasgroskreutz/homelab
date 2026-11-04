@@ -36,13 +36,18 @@ spec:
           kind: PrometheusRule
   values:
     defaultRules:
-      disabled:
+      rules:
         # k3s runs the controller-manager, scheduler and kube-proxy inside the
-        # apiserver process, so there are no Services to scrape. These three
+        # apiserver process, so there are no endpoints to scrape and these
         # alerts can only ever fire as false positives on a single-node k3s.
-        KubeControllerManagerDown: true
-        KubeSchedulerDown: true
-        KubeProxyDown: true
+        #
+        # Disable the whole rule GROUP, not just the alert. Setting
+        # defaultRules.disabled.<Alert> removes only the alert body and leaves
+        # a group with "rules: null", which the PrometheusRule CRD rejects:
+        #   spec.groups[0].rules: Invalid value: "null": must be of type array
+        kubeControllerManager: false
+        kubeSchedulerAlerting: false
+        kubeProxy: false
     alertmanager:
       alertmanagerSpec:
         # Use our own config (ntfy receivers) instead of the chart default,
