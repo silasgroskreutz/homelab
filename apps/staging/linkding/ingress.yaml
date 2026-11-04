@@ -3,6 +3,10 @@ kind: Ingress
 metadata:
   name: linkding
   namespace: linkding
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
 spec:
   ingressClassName: traefik
   rules:
@@ -16,3 +20,7 @@ spec:
                   number: 9090
             path: /
             pathType: Prefix
+  tls:
+    - hosts:
+        - lds.silasgroskreutz.com
+      secretName: linkding-tls

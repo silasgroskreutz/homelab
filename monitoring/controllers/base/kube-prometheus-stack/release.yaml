@@ -5,13 +5,11 @@ metadata:
   namespace: monitoring
 spec:
   interval: 30m
+  timeout: 35m
   chart:
     spec:
       chart: kube-prometheus-stack
       version: "66.2.2"
-
-      # version: "58.x"
-
       sourceRef:
         kind: HelmRepository
         name: kube-prometheus-stack
@@ -19,8 +17,18 @@ spec:
       interval: 12h
   install:
     crds: Create
+    timeout: 30m
+    remediation:
+      retries: 2
+      retryInterval: 1m
   upgrade:
-    crds: CreateReplace
+    # CRDs are already at the chart's version. Create avoids deleting every
+    # PrometheusRule/ServiceMonitor/Prometheus CR when the CRD is replaced.
+    crds: Create
+    timeout: 30m
+    remediation:
+      retries: 2
+      retryInterval: 1m
   driftDetection:
     mode: enabled
     ignore:
@@ -29,16 +37,35 @@ spec:
         target:
           kind: PrometheusRule
   values:
+    defaultRules:
+      disabled:
+        # k3s runs the controller-manager, scheduler and kube-proxy inside the
+        # apiserver process, so there are no Services to scrape. These three
+        # alerts can only ever fire as false positives on a single-node k3s.
+        KubeControllerManagerDown: true
+        KubeSchedulerDown: true
+        KubeProxyDown: true
+    alertmanager:
+      alertmanagerSpec:
+        # Use our own config (ntfy receivers) instead of the chart default,
+        # which routes everything to a receiver named "null".
+        configSecret: alertmanager-config-secret
     grafana:
-      adminPassword: REDACTED
+      admin:
+        # Credentials live in a sops-encrypted Secret, never in this repo.
+        existingSecret: grafana-admin-secret
+        userKey: admin-user
+        passwordKey: admin-password
       ingress:
         enabled: true
         ingressClassName: traefik
-
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-prod
+          traefik.ingress.kubernetes.io/router.entrypoints: websecure
+          traefik.ingress.kubernetes.io/router.tls: "true"
         hosts:
           - grs.silasgroskreutz.com
-
         tls:
-          - secretName: grafana-tls-secret
+          - secretName: grafana-tls
             hosts:
               - grs.silasgroskreutz.com
