@@ -20,7 +20,6 @@ spec:
     timeout: 30m
     remediation:
       retries: 2
-      retryInterval: 1m
   upgrade:
     # CRDs are already at the chart's version. Create avoids deleting every
     # PrometheusRule/ServiceMonitor/Prometheus CR when the CRD is replaced.
@@ -28,7 +27,6 @@ spec:
     timeout: 30m
     remediation:
       retries: 2
-      retryInterval: 1m
   driftDetection:
     mode: enabled
     ignore:
