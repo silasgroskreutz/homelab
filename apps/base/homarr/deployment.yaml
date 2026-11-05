@@ -15,11 +15,16 @@ spec:
     spec:
       securityContext:
         fsGroup: 1000
-        runAsUser: 1000
-        runAsGroup: 1000
       containers:
         - name: homarr
           image: ghcr.io/homarr-labs/homarr:latest
+          # The upstream image ships no USER directive and its entrypoint writes
+          # /etc/nginx/nginx.conf, which requires root. Running as uid 1000
+          # makes the container fail with "cannot create /etc/nginx/nginx.conf".
+          # fsGroup above still keeps the /appdata PVC group-writable.
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
           env:
             - name: PORT
               valueFrom:
