@@ -20,9 +20,17 @@ spec:
       containers:
         - name: homarr
           image: ghcr.io/homarr-labs/homarr:latest
-          envFrom:
-            - configMapRef:
-                name: homarr-configmap
+          env:
+            - name: PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: homarr-configmap
+                  key: PORT
+            - name: SECRET_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: homarr-secret
+                  key: secret-encryption-key
           ports:
             - containerPort: 3000
           volumeMounts:

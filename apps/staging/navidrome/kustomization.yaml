@@ -3,4 +3,5 @@ kind: Kustomization
 namespace: navidrome
 resources:
   - ../../base/navidrome
+  - secret.yaml
   - cloudflare.yaml
