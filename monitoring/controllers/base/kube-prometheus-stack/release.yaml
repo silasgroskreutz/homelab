@@ -53,6 +53,19 @@ spec:
         # Use our own config (ntfy receivers) instead of the chart default,
         # which routes everything to a receiver named "null".
         configSecret: alertmanager-config-secret
+      ingress:
+        enabled: true
+        ingressClassName: traefik
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-prod
+          traefik.ingress.kubernetes.io/router.entrypoints: websecure
+          traefik.ingress.kubernetes.io/router.tls: "true"
+        hosts:
+          - alerts.silasgroskreutz.com
+        tls:
+          - secretName: alertmanager-tls
+            hosts:
+              - alerts.silasgroskreutz.com
     grafana:
       admin:
         # Credentials live in a sops-encrypted Secret, never in this repo.

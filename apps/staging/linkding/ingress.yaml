@@ -10,7 +10,7 @@ metadata:
 spec:
   ingressClassName: traefik
   rules:
-    - host: lds.silasgroskreutz.com
+    - host: linkding.silasgroskreutz.com
       http:
         paths:
           - backend:
@@ -22,5 +22,5 @@ spec:
             pathType: Prefix
   tls:
     - hosts:
-        - lds.silasgroskreutz.com
+        - linkding.silasgroskreutz.com
       secretName: linkding-tls
