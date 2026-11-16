@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: changedetection-data-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  # The local-path provisioner does NOT enforce PVC quotas, so an
+  # undersized request is harmless today. If this ever moves to a storage
+  # class that enforces limits, expand the PVC FIRST.

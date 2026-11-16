@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: changedetection
+  annotations:
+    # The public hostname must match this DNS record, or Traefik serves its
+    # default certificate and the client sees a TLS error.
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: changedetection.silasgroskreutz.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: changedetection
+                port:
+                  number: 5000
+  tls:
+    - hosts:
+        - changedetection.silasgroskreutz.com
+      secretName: changedetection-tls

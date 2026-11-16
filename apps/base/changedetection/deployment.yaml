@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: changedetection
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: changedetection
+  template:
+    metadata:
+      labels:
+        app: changedetection
+      annotations:
+        # Bump this when a mounted ConfigMap changes, or the pod keeps
+        # running the old content. See the k8s-application-deployment skill.
+        checksum/config: "initial"
+    spec:
+      securityContext:
+        # The upstream image declares no USER and is built on python:3.8-slim.
+        # Its data dir /datastore is created root-owned by the image, so the
+        # container must run as root to write there. runAsUser/runAsGroup are
+        # deliberately NOT set. fsGroup keeps the mounted PVC group-writable
+        # so the volume is not locked to root-only access.
+        fsGroup: 1000
+      containers:
+        - name: changedetection
+          # Pinned to the multi-arch INDEX digest, so the deployment is
+          # reproducible and stays correct on every node architecture.
+          # linux/amd64 -> sha256:e423173747d6468b813df42ac5ec23991afffa27e933fbc4ad431861812eeca9
+          image: ghcr.io/dgtlmoon/changedetection.io@sha256:d25de0cd2119edd5e3f615a03bc40798ed2457e442ccb8b17c9ace78ac06cf44
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5000
+          readinessProbe:
+            # GET / serves the login page and returns 200 with no auth.
+            # There is no /healthz endpoint in this app.
+            httpGet:
+              path: /
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              # The image CMD is 'python ./changedetection.py -d /datastore',
+              # so the datastore path MUST be /datastore. Mounting at /data
+              # leaves the app writing to the container's ephemeral layer and
+              # the PVC is never used.
+              mountPath: /datastore
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: changedetection-data-pvc
