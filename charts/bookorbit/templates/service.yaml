@@ -12,3 +12,7 @@ spec:
       name: http
   selector:
     {{- include "bookorbit.selectorLabels" . | nindent 4 }}
+    # The postgres pod carries the same name/instance labels, so without the
+    # component label this Service would also route to the database pod and
+    # half of all requests would hit a closed port.
+    app.kubernetes.io/component: app

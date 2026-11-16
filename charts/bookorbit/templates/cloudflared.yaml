@@ -27,10 +27,12 @@ spec:
   selector:
     matchLabels:
       app: cloudflared
+      app.kubernetes.io/component: cloudflared
   template:
     metadata:
       labels:
         app: cloudflared
+        app.kubernetes.io/component: cloudflared
     spec:
       containers:
       - name: cloudflared

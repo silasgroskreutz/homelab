@@ -13,10 +13,15 @@ spec:
   selector:
     matchLabels:
       {{- include "bookorbit.selectorLabels" . | nindent 6 }}
+      # A Deployment selector is immutable, and the postgres pod shares the
+      # name/instance labels, so the component label is what keeps the
+      # Deployment from adopting the database pod.
+      app.kubernetes.io/component: app
   template:
     metadata:
       labels:
         {{- include "bookorbit.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: app
     spec:
       securityContext:
         fsGroup: {{ .Values.app.puid }}
