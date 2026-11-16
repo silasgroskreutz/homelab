@@ -10,6 +10,15 @@ spec:
     kind: HelmChart
     name: bookorbit
     namespace: flux-system
+  # Pull the non-sensitive rotation id out of the SOPS-encrypted Secret so the
+  # chart can annotate the Deployment with it. When ROTATION_ID changes in
+  # Git, helm-controller re-upgrades the release and the Deployment rolls,
+  # which is what makes the pod pick up new credential values.
+  valuesFrom:
+    - kind: Secret
+      name: bookorbit-secret
+      valuesKey: ROTATION_ID
+      targetPath: app.secretRotationId
   install:
     createNamespace: false
     remediation:

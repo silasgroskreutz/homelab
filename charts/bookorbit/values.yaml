@@ -36,6 +36,10 @@ app:
   # Library root the web UI may browse.
   libraryBrowseRoot: /books
   secretName: bookorbit-secret
+  # Non-sensitive rotation id. The HelmRelease pulls this from the Secret's
+  # ROTATION_ID key so that bumping it in Git rolls the Deployment and the
+  # pod picks up new credential values.
+  secretRotationId: unset
   resources:
     requests:
       cpu: 100m

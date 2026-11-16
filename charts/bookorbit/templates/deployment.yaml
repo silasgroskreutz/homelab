@@ -22,6 +22,12 @@ spec:
       labels:
         {{- include "bookorbit.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: app
+      annotations:
+        # The Secret is applied by Flux, not by this chart, so Helm cannot
+        # checksum its contents. Instead the chart carries a non-sensitive
+        # rotation id that the HelmRelease pulls from the Secret's ROTATION_ID
+        # key; bumping that id is what rolls the pod onto new credentials.
+        bookorbit.silasgroskreutz.com/secret-rotation: {{ .Values.app.secretRotationId | default "unset" | quote }}
     spec:
       securityContext:
         fsGroup: {{ .Values.app.puid }}
