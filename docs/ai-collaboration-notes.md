@@ -98,52 +98,33 @@ so it becomes `new_app.py --preset kavita` instead of remembering the details.
 
 ## The Voice Scenario, Concretely
 
-*"Play JRPG playlist."*
+*"Play JRPG playlist."* — the example Silas used to describe the shape of a capability.
 
-What that needs, end to end:
+**What exists:** the *action* half is proven. Navidrome has 71 genres including
+`Video Game Music`, `Game Soundtrack`, `OST Score`, and several more, and its playlist
+schema supports **smart playlists** (the `rules`/`evaluatedAt` fields are in the API
+response) — so "JRPG playlist" can be a *rule*, not a hand-built list, and it stays
+current as the library changes.
 
-1. **Wake word / speech-to-text** — where does the audio come from?
-   A phone, a laptop, a smart speaker, a Pi in the living room.
-2. **Intent routing** — the phrase becomes an action. This is where "AI" enters, and it
-   can be as simple as pattern matching a small vocabulary of commands.
-3. **The action** — call Navidrome's API to find or build the playlist, then hand it to
-   a player.
-4. **Playback** — Navidrome is a *server*, not a speaker. Something has to actually make
-   sound: Sonos, AirPlay, Chromecast, a browser tab, or a local player on Prodesk.
+**What's missing:** the hardware. Silas does not own a device that plays audio yet.
 
-**What exists:** step 3 is proven. Navidrome has 71 genres including `Video Game Music`,
-`Game Soundtrack`, `OST Score`, and several more, and its playlist schema supports
-**smart playlists** (the `rules`/`evaluatedAt` fields are in the API response) — so
-"JRPG playlist" can be a *rule*, not a hand-built list, and it stays current as the
-library changes.
+### The hardware idea (parked, not abandoned)
 
-**What's missing:** steps 1, 2, and 4 — the whole path from microphone to sound. This is
-the genuinely interesting part and it has several viable architectures.
+Silas is interested in the **"repurpose old hardware into an agent node"** pattern —
+hackers who take an old Sonos or Amazon Echo and migrate it to run a Hermes agent. He
+still needs to buy a device.
 
-### Three ways the voice layer could work
+Two things worth keeping in mind:
 
-**A. Home Assistant + LLM** (most capable)
-Home Assistant owns the voice pipeline and the speakers. A local or cheap LLM parses
-intent. HA calls a small webhook that Hermes exposes.
-*Pro:* best speaker support, mature voice stack, works when the internet is down.
-*Con:* another system to run and maintain.
+- **The agent does not have to live on the device.** The pattern that scales is: agent
+  runs on Prodesk/Virgil, the old speaker becomes a thin mic-in/speaker-out endpoint.
+- **Three rough paths, with honest confidence:** (a) Sonos kept as-is, driven by its
+  *local* control API — most likely to work first, least "hacked"; (b) a Pi in the
+  shell, stripping the amp and driving the original driver — full control, most reliable
+  long-term; (c) Echo, flashed — highest fun, highest risk.
 
-**B. Hermes as the brain, HA as the voice** (leanest)
-Home Assistant's Assist handles wake word and STT, but forwards recognized *text* to
-Hermes. Hermes maps it to an action and calls Navidrome directly.
-*Pro:* all the intelligence in one place; easy to extend to other apps; the voice layer
-stays dumb and reliable.
-*Con:* Hermes is the single point of failure for anything non-voice.
-
-**C. Direct, no assistant** (fastest to prove)
-A tiny always-on service (on Prodesk or Virgil) does wake word → STT → a fixed command
-grammar → Navidrome API → playback. No LLM in the loop for the common cases.
-*Pro:* instant, no hallucination risk, works offline, dead simple.
-*Con:* every new command is code, not a prompt.
-
-**A defensible path: C first, then B, then A.** C proves the plumbing end to end with
-one command. B makes the vocabulary natural. A is there when you want to talk to the
-house about more than music.
+**This is deliberately not a plan.** It is a parked idea awaiting a hardware purchase.
+No architecture was chosen and none should be built before a device exists.
 
 ---
 
@@ -151,17 +132,18 @@ house about more than music.
 
 *Silas's call. Pick or edit.*
 
-1. **Where does the microphone live?** Existing phone/laptop, or buy a dedicated device?
-2. **What plays the audio?** Sonos/AirPlay/Chromecast if present, or a local player on
-   Prodesk driving the speakers?
-3. **Offline or always-online?** Option C works offline; A and B mostly need the LLM
-   reachable (local Ollama on Virgil, or a paid API).
-4. **Is Hermes allowed to act without confirming?** Playing a playlist = harmless.
-   Deleting things = confirm first. Where exactly is that line?
-5. **Which model does intent parsing?** Local on Virgil (free, private, slower) or a paid
-   API (fast, cheap, but your prompts leave the house)?
-6. **How far does this generalize?** "Play X" is one app. Should the same identity
-   pattern cover lights, thermostats, and camera clips later?
+1. **Offline or always-online?** A local Ollama on Virgil or a paid API — this decides
+   what a future voice/agent endpoint can assume about connectivity.
+2. **Is Hermes allowed to act without confirming?** Playing a playlist = harmless.
+   Creating a Kanban card = probably harmless. Deploying to the cluster = not.
+
+---
+
+## Related Plans
+
+- **`docs/bookmark-to-deploy-pipeline.md`** — Karakeep → Kanban → overnight deploy.
+  The other active thread of ideas: turning 246 saved bookmarks into a queue of things
+  that actually get built.
 
 ---
 
