@@ -75,17 +75,47 @@ dependency the rest of the cluster does not have.
 ## Secrets
 
 `apps/staging/bookorbit/secret.yaml` is SOPS-encrypted and holds
-`POSTGRES_PASSWORD`, `JWT_SECRET` and `SETUP_BOOTSTRAP_TOKEN`. Values are
-never written in plaintext, in Git history, or in logs.
+`POSTGRES_PASSWORD`, `JWT_SECRET`, `SETUP_BOOTSTRAP_TOKEN` and
+`ROTATION_ID`. Values are never written in plaintext, in Git history, or in
+logs.
 
 `apps/staging/bookorbit/tunnel-secret.yaml` is SOPS-encrypted and holds the
 tunnel `credentials.json`.
 
-The first-run setup page asks for the bootstrap token:
+### Rotating a credential
+
+The Secret is applied by Flux, not by the chart, so Helm cannot checksum it
+and the pod would otherwise keep the old value in its environment after a
+rotation. The `ROTATION_ID` key solves this:
+
+1. Change the credential value in `apps/staging/bookorbit/secret.yaml`.
+2. Bump `ROTATION_ID` (for example `r2` -> `r3`).
+3. Commit and push.
+
+The HelmRelease pulls `ROTATION_ID` out of the Secret through `valuesFrom` and
+passes it to the chart as `app.secretRotationId`. The Deployment annotates
+its pod template with it, so the bump changes the pod spec, the Deployment
+rolls, and the new pod reads the new credential.
+
+Verify the roll landed:
 
 ```
-kubectl -n bookorbit get secret bookorbit-secret -o jsonpath='{.data.SETUP_BOOTSTRAP_TOKEN}' | base64 -d
+kubectl -n bookorbit get deploy bookorbit \
+  -o jsonpath='{.spec.template.metadata.annotations.bookorbit\.silasgroskreutz\.com/secret-rotation}'
 ```
+
+### First-run setup
+
+Setup is one-shot: the app refuses setup once a user exists. The bootstrap
+token is checked against the `x-setup-token` header on `POST /api/v1/auth/setup`.
+
+```
+kubectl -n bookorbit get secret bookorbit-secret \
+  -o jsonpath='{.data.SETUP_BOOTSTRAP_TOKEN}' | base64 -d
+```
+
+The admin account created during setup was `silas` with the password stored
+outside the repo in `~/.bookorbit-credentials` (mode 600).
 
 ## Library storage
 
