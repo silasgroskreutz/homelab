@@ -11,3 +11,4 @@ resources:
   - changedetection
   - mario
   - backup
+  - cert-manager
