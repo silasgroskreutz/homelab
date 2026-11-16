@@ -4,6 +4,12 @@ metadata:
   name: changedetection
 spec:
   replicas: 1
+  # Recreate, not the default RollingUpdate. The datastore is a SQLite file
+  # on the PVC, so two pods must never hold it at the same time. A rolling
+  # update would start the new pod (maxSurge 1) BEFORE the old one releases
+  # the ReadWriteOnce volume, giving two writers on one database file.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: changedetection
@@ -41,6 +47,18 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            # Same signal as readiness: GET / returns 200 with no auth.
+            # There is no /healthz endpoint in this app. Liveness is generous
+            # (3x the readiness tolerance) so a slow login-page render under
+            # load never gets the pod killed and restarted.
+            httpGet:
+              path: /
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
             failureThreshold: 6
           volumeMounts:
             - name: data
