@@ -31,6 +31,75 @@
         }
       ],
       "_comment": "DECISION (t_0b444f02): the instance's API and RSS tokens are redacted from the published artifact; a restored instance generates its own on first start. Why this option: it is the only one that needs no credential material anywhere outside the running instance, and it matches the behaviour the app already has for the other credential in this datastore - secret.txt is excluded from the archive for exactly the same reason (it is a credential and does not belong on a backup target), and the app's own store.py regenerates a missing api_access_token / rss_access_token on startup (store.py: 'Generate the URL access token for RSS feeds' / 'Generate the API access token'). Rejected alternatives: (a) restoring the SAME tokens from a SOPS-encrypted Secret at restore time - keeps one credential in two places and leaves the tokens in every older artifact, so it does not actually reduce the exposure; (b) accepting the exposure in writing - /mnt/nas-roms is a CIFS share that also holds Books, Movies, Music and roms, it is not a secret store, and api_access_token is a bearer token accepted on the WRITE routes too (DELETE /api/v1/watch/<uuid>), so this instance's only authentication would be readable by anyone with read access to the share. The redaction is fail-closed: if the member cannot be parsed, the redaction path is missing, the spec matches no member, or the token value turns up anywhere in the staged archive, the backup run FAILS and nothing is published. The verify step still compares the archived watch count against the live source."
+    },
+    {
+      "name": "bookorbit",
+      "kind": "pgdump",
+      "host": "bookorbit-postgres.bookorbit.svc.cluster.local",
+      "port": 5432,
+      "user": "bookorbit",
+      "database": "bookorbit",
+      "keep": 3,
+      "verify": "pg_restore_list",
+      "_comment": "DECISION (t_fcb45e7b): BookOrbit's real data is PostgreSQL. The live instance (deploy/bookorbit, sts/bookorbit-postgres) holds books, book_files, users, book_covers, annotations and the drizzle migrations in the database; the book FILES themselves live on the NAS already, at /mnt/nas-roms/Books, mounted into the pod as /books, so they are not part of the backup set. The host is the fully qualified service name because the backup CronJob lives in the `backup` namespace and a bare `bookorbit-postgres` would resolve in the WRONG namespace and fail to connect. PGPASSWORD comes from the SOPS-encrypted Secret bookorbit-postgres in the backup namespace (Kubernetes Secrets are namespace-scoped, so the credential cannot be read out of the bookorbit namespace). Verified from the `backup` namespace: pg_dump of the live database produces a custom-format dump that pg_restore --list reads cleanly."
+    },
+    {
+      "name": "bookorbit-covers",
+      "kind": "tar",
+      "source": "/bookorbit/covers",
+      "keep": 2,
+      "verify": {
+        "min_files": 100,
+        "compare_source_files": true
+      },
+      "_comment": "DECISION (t_fcb45e7b): the cover tree is the only non-empty data on the BookOrbit PVC (measured 2026-11-16: 300,432,680 bytes in 1,154 files for 577 books; every other subtree - book-bucket, book-dock, read-aloud, tmp, upload-sessions - holds 0 files). The book_covers table records one row per cover (medium, source, origin, width, height, updated_at, dormant_since) and every row has origin='embedded', i.e. the image was extracted from the book's own artwork; the book files are on the NAS Books share, so this tree is DERIVED and could in principle be rebuilt by a rescan. It is backed up anyway because the card asks for it, because a rescan does not reproduce the stored metadata, and because a 300 MB nightly write is affordable on a 2.1 TB share. keep=2 because of the size. min_files guards against an archive that silently lost the tree; compare_source_files proves the archive holds exactly what the live tree holds."
+    },
+    {
+      "name": "navidrome",
+      "kind": "sqlite",
+      "source": "/navidrome/navidrome.db",
+      "keep": 3,
+      "verify": {
+        "integrity_check": true,
+        "compare_tables": [
+          "user",
+          "library"
+        ]
+      },
+      "_comment": "DECISION (t_fcb45e7b): kind is sqlite, NOT the engine's `navidrome` kind, because the pinned backup image (192.168.0.101:5000/homelab-backup@sha256:42b1e010...) contains no navidrome binary at all - measured inside that image: `command -v navidrome` -> exit 127, `navidrome --version` -> 'navidrome: not found', and `find / -maxdepth 4 -name 'navidrome*' -type f` returns nothing. With kind=navidrome the run would fail every night with 'navidrome backup create failed: [Errno 2] No such file or directory'. The native path needs the navidrome CLI copied into the image, which is a separate change (this card pins the existing image). The sqlite path is also strictly more correct here: the live navidrome.db is stale (mtime Nov 12) against a 127,073,192-byte WAL (Nov 16), so a plain copy of the .db file holds 1 user row while the live database holds 2; the SQLite online backup API captures the WAL-only rows. The engine's `navidrome` kind ends at the same place anyway - it re-snapshots the CLI's output through the backup API for consistency. compare_tables lists the two tables that only change when a user or a library is added; the volatile ones (media_file, annotation) are deliberately not compared, because Navidrome writes while the backup runs and a mismatch there would fail the run for the wrong reason. The artwork/, cache/ and backup/ subtrees of the PVC are NOT backed up: artwork and cache are regenerable caches, and backup/ holds Navidrome's own backups, which these artifacts supersede."
+    },
+    {
+      "name": "linkding",
+      "kind": "sqlite",
+      "source": "/linkding/db.sqlite3",
+      "keep": 3,
+      "verify": {
+        "integrity_check": true,
+        "compare_tables": [
+          "django_migrations",
+          "auth_permission",
+          "bookmarks_bookmark"
+        ]
+      },
+      "_comment": "DECISION (t_fcb45e7b): Linkding's main database is a SQLite file in WAL mode on the PVC root. Upstream's own full_backup command (read from the live container: /etc/linkding/bookmarks/management/commands/full_backup.py) snapshots this exact file with the same SQLite backup API this engine uses, so the mechanism matches upstream's own. compare_tables names django_migrations and auth_permission (stable infrastructure tables that prove the schema and the permissions came across) plus bookmarks_bookmark (the user's actual data). Note that this instance currently holds 0 bookmarks - it is an unused instance - so the artifact legitimately matches the live database at 0 rows there; the other two tables prove the comparison is real."
+    },
+    {
+      "name": "linkding-data",
+      "kind": "tar",
+      "source": "/linkding",
+      "keep": 3,
+      "exclude": [
+        "*.sqlite3",
+        "*.sqlite3-wal",
+        "*.sqlite3-shm",
+        "secretkey.txt"
+      ],
+      "verify": {
+        "min_files": 0,
+        "allow_empty": true,
+        "compare_source_files": true
+      },
+      "_comment": "DECISION (t_fcb45e7b): the file-backed part of the Linkding data folder - assets/, favicons/ and previews/ - which is exactly what upstream's full_backup archives alongside the database. Upstream's full_backup does NOT archive tasks.sqlite3 (the huey task queue) and neither does this backup set: the card scopes Linkding to 'the complete application backup scope as defined by its own full_backup implementation', and the queue is transient state that the application rebuilds on start. The database is excluded from this archive because it is snapshotted properly by the sqlite kind above (a raw copy of a WAL database loses whatever is still in the WAL). secretkey.txt is excluded because it is Django's SECRET_KEY: a credential, and /mnt/nas-roms is a CIFS share that also holds Books, Movies and Music, not a secret store. Upstream excludes it too, and `manage.py generate_secret_key` writes a fresh one when the file is missing ('Generate secret key file if it does not exist'), so a restored instance comes up on its own key. allow_empty is set because all three directories are legitimately empty on this instance (measured: assets/, favicons/ and previews/ hold 0 files each) - failing the whole nightly job over an empty upload directory would be wrong - and compare_source_files still proves the archive matches the live tree as soon as it is not empty."
     }
   ]
 }

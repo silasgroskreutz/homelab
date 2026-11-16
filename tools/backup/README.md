@@ -1,29 +1,183 @@
-# changedetection.io backup and restore
+# Backup engine and restore procedures
 
 This directory holds the backup engine, its configuration, and the restore
-procedure for the changedetection.io datastore.
+procedures for the four applications in the backup set.
 
 - `backup.py` — the backup engine. Runs as a Kubernetes Job from the
   `backup` namespace. Logic comes from Git via a ConfigMap, not from the
   image.
 - `config.json` — which apps to back up, what to exclude, what to verify.
-- `datastore-path.sh` — prints the hostPath that backs the
-  changedetection datastore PVC.
+- `datastore-path.sh` — prints the hostPath that backs each app's
+  datastore PVC.
 - `gen-configmap.sh` — regenerates `apps/base/backup/configmap.yaml` from
   `backup.py` and `config.json`. Run it in the SAME commit as any change to
   either file.
 - `restore.sh` — restores a backup artifact into a datastore directory and
-  verifies the result. See [Restoring](#restoring) below.
+  verifies the result. See [Restoring](#restoring) below. It covers the
+  changedetection.io artifact; the other three apps have their own
+  restore notes in [Restoring the other apps](#restoring-the-other-apps).
 
-Artifacts land on the node at:
+## The backup set
 
-    /mnt/nas-roms/Backups/changedetection/changedetection-<UTC-timestamp>.tar.gz
+One CronJob per application, all in the `backup` namespace, all running the
+same engine and the same configuration with a different `--only` selection.
+An app's job can therefore never back up another app's data and never
+prune another app's artifacts.
 
-Retention is 2 artifacts (`keep: 2` in `config.json`).
+| App | Kind | Schedule (America/Chicago) | Artifact | `keep` |
+|---|---|---|---|---|
+| Linkding | `sqlite` + `tar` | `37 0 * * *` | `Backups/linkding/linkding-<stamp>.db`, `Backups/linkding-data/linkding-data-<stamp>.tar.gz` | 3 |
+| BookOrbit | `pgdump` + `tar` | `17 2 * * *` | `Backups/bookorbit/bookorbit-<stamp>.dump`, `Backups/bookorbit-covers/bookorbit-covers-<stamp>.tar.gz` | 3 / 2 |
+| changedetection.io | `tar` | `23 4 * * *` | `Backups/changedetection/changedetection-<stamp>.tar.gz` | 2 |
+| Navidrome | `sqlite` | `43 5 * * *` | `Backups/navidrome/navidrome-<stamp>.db` | 3 |
+
+The schedules are deliberately spread out: no two of them are on the same
+CIFS share at the same minute, and none of them sit on the hour. The
+changedetection artifact is ~66 KB; the Navidrome artifact is ~82 MB and
+the BookOrbit cover archive is ~288 MB, so the small backups are not
+scheduled next to the large ones. `concurrencyPolicy: Forbid` only
+prevents one CronJob from overlapping itself — it does NOT stop two
+different CronJobs from running at the same time. The schedules are what
+prevent that.
+
+Retention is per app (`keep` in `config.json`). `prune()` only ever
+touches the directories of the apps the running job is responsible for,
+and inside those directories only deletes files this engine produced
+(`<app>-<UTC stamp><suffix>`). A vendor's own backup or a manual dump in
+the same directory is kept and logged as kept.
+
+### Where each app's data actually lives
+
+| App | Live location | Backup reads |
+|---|---|---|
+| Linkding | `/etc/linkding/data` on the `linkding` PVC | `db.sqlite3` (SQLite backup API) plus a tar of `assets/`, `favicons/`, `previews/` |
+| BookOrbit | PostgreSQL in the `bookorbit` namespace, cover images in the `bookorbit` PVC | `pg_dump` of the `bookorbit` database plus a tar of `covers/` |
+| changedetection.io | JSON store on the `changedetection` PVC | tar of the whole datastore |
+| Navidrome | `navidrome.db` (+ WAL) on the `navidrome` PVC | SQLite backup API snapshot of the database |
+
+Notes that are easy to get wrong:
+
+- **Navidrome's `.db` file is stale.** Navidrome checkpoints rarely, so
+  the `.db` on disk can be days old while a 127 MB `-wal` holds the current
+  rows. Copying the `.db` loses them. The SQLite backup API reads the WAL
+  and captures the live state. Measured 2026-11-16: the raw file held 1
+  `user` row, the live database held 2.
+- **Navidrome's native CLI is not in the backup image.** The pinned image
+  has no `navidrome` binary (`command -v navidrome` → exit 127), so the
+  engine's `navidrome` kind cannot run against it. Navidrome therefore
+  uses `kind: sqlite`, which is where the native kind ends up anyway — it
+  re-snapshots the CLI's output through the SQLite backup API.
+- **Linkding's scope follows upstream's own `full_backup`**, read from the
+  running container: `db.sqlite3` (through the same backup API),
+  `assets/`, `favicons/`, `previews/`. Upstream deliberately leaves out
+  `tasks.sqlite3` (the transient huey queue) and `secretkey.txt`
+  (Django's SECRET_KEY — a credential, and this share is not a secret
+  store; the app generates a fresh key when the file is missing).
+- **BookOrbit's book files are not in the backup set.** They already live
+  on the NAS (`/mnt/nas-roms/Books`), mounted into the app as `/books`.
+  The cover tree is derived from the books' own artwork but is backed up
+  anyway, because a rescan does not reproduce the stored metadata.
+
+### Why the apps are mounted with a hostPath
+
+A PersistentVolumeClaim can only be mounted by a pod in the SAME namespace
+as the claim. These CronJobs live in the dedicated `backup` namespace and
+the datastores live in `linkding`, `bookorbit`, `changedetection` and
+`navidrome`, so the PVCs cannot be mounted directly.
+
+The cluster is a single-node k3s cluster and the PVCs are provisioned by
+the local-path provisioner, so each datastore is a directory on the node.
+Each CronJob mounts that directory read-only through a hostPath. The path
+contains the PVC's UID, so it changes if the PVC is recreated:
+
+```sh
+./tools/backup/datastore-path.sh            # every app
+./tools/backup/datastore-path.sh navidrome  # one app
+```
+
+Update the matching `apps/base/backup/cronjob-<app>.yaml` when the path
+changes. A stale path makes the job fail loudly; it does not silently
+archive an empty directory.
+
+### Credentials
+
+BookOrbit's `pg_dump` needs the PostgreSQL password. It comes from the
+SOPS-encrypted Secret `bookorbit-postgres` in the `backup` namespace
+(`apps/staging/backup/secret.yaml`) — Kubernetes Secrets are
+namespace-scoped, so the credential cannot be read out of the `bookorbit`
+namespace. The job runs as the app-specific ServiceAccount
+`backup-bookorbit`. No credential is ever in a ConfigMap.
+
+### The rules the CIFS share imposes
+
+- Every pod that writes to `/mnt/nas-roms` runs as `runAsUser: 1000`,
+  `runAsGroup: 0`, `fsGroup: 1000`. The share is mounted
+  `uid=1000,forceuid,gid=0,noforcegid`; a UID 1000 pod cannot overwrite a
+  file created by root, and root cannot create files a UID 1000 pod can
+  then delete.
+- **SQLite is never written directly onto the share.** SQLite's online
+  backup API does random-access I/O and produces ZERO-BYTE files on this
+  mount. Every SQLite backup is staged on local disk, verified there, and
+  then copied to the share with a plain sequential write.
+- The copy is verified after writing: the artifact is read back from the
+  share and its sha256 compared with the staged file.
 
 ---
 
+## Restoring the other apps
+
+`restore.sh` covers the changedetection.io artifact only. The other three
+have different artifact formats, and each one has its own recovery path.
+
+### Linkding (`linkding-<stamp>.db` + `linkding-data-<stamp>.tar.gz`)
+
+The `.db` artifact is a single self-contained SQLite file: the WAL state
+was folded in and the journal mode was converted to `DELETE`, so there is
+no `-wal`/`-shm` sibling to restore alongside it. To restore:
+
+1. Scale the app down: `kubectl scale deploy/linkding -n linkding --replicas=0`
+2. Stop it writing to the old database first. **Do not** copy the artifact
+   over a live `db.sqlite3`: a WAL-mode database with a stale `-wal` next
+   to it will replay that WAL on top of the restored file. Remove the
+   live `db.sqlite3`, `db.sqlite3-wal` and `db.sqlite3-shm` and then copy
+   the artifact in as `db.sqlite3`.
+3. Extract `linkding-data-<stamp>.tar.gz` over the data directory for the
+   `assets/`, `favicons/` and `previews/` trees (the archive is rooted at
+   the data directory's basename, so strip one component).
+4. `secretkey.txt` is not in the artifact by design. Leave the live one in
+   place if it exists; if it is missing, Linkding generates a fresh one on
+   start.
+5. Scale back up and confirm the bookmarks are listed.
+
+### BookOrbit (`bookorbit-<stamp>.dump`)
+
+A custom-format `pg_dump`. To restore:
+
+```sh
+kubectl scale deploy/bookorbit -n bookorbit --replicas=0
+kubectl -n bookorbit exec sts/bookorbit-postgres -- \
+  pg_restore --clean --if-exists --no-owner \
+  -U bookorbit -d bookorbit < /path/to/bookorbit-<stamp>.dump
+kubectl scale deploy/bookorbit -n bookorbit --replicas=1
+```
+
+The password comes from the same SOPS-encrypted Secret (`PGPASSWORD`).
+The cover images are not in the dump — they are in
+`bookorbit-covers-<stamp>.tar.gz`, which untars over the `covers/`
+directory on the BookOrbit PVC. The book files themselves are not in
+either artifact: they live on `/mnt/nas-roms/Books`.
+
+### Navidrome (`navidrome-<stamp>.db`)
+
+A single self-contained SQLite file, same WAL situation as Linkding:
+remove the live `navidrome.db`, `navidrome.db-wal` and `navidrome.db-shm`
+before copying the artifact in, or Navidrome will replay the stale WAL.
+`artwork/`, `cache/` and `backup/` are deliberately not backed up — they
+are regenerable caches.
+
 ## Restoring
+
+The restore procedure below is the **changedetection.io** one.
 
 The restore procedure was proven by hand in kanban task `t_c1345881`
 against a scratch namespace with a deliberately damaged datastore. This

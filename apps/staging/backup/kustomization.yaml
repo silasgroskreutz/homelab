@@ -3,3 +3,9 @@ kind: Kustomization
 namespace: backup
 resources:
   - ../../base/backup
+  # SOPS-encrypted. Flux decrypts these with the cluster's age key.
+  # This is the PostgreSQL credential for the BookOrbit dump. It has to
+  # live in the `backup` namespace because Kubernetes Secrets are
+  # namespace-scoped and the backup CronJob cannot read a Secret out of
+  # the `bookorbit` namespace.
+  - secret.yaml

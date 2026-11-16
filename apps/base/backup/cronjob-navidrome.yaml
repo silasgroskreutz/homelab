@@ -1,0 +1,86 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: navidrome-backup
+spec:
+  # 05:43 every day. Navidrome's artifact is the database snapshot, about
+  # 83 MB, so this is the second largest job of the four - and it is the
+  # only one that reads a 127 MB write-ahead log. It runs at 05:43, clear
+  # of BookOrbit at 02:17 (the 300 MB cover tree), clear of
+  # changedetection at 04:23 and clear of Linkding at 00:37, so no two
+  # backups are ever on the CIFS share at the same minute.
+  schedule: "43 5 * * *"
+  timeZone: "America/Chicago"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            # Mandatory for the CIFS share, see the changedetection job.
+            runAsUser: 1000
+            runAsGroup: 0
+            fsGroup: 1000
+          containers:
+            - name: backup
+              image: 192.168.0.101:5000/homelab-backup@sha256:42b1e01087ed854d6130646b6765b668704ebc07e8ac9fd876cbbdc9d5d2e4e8
+              imagePullPolicy: IfNotPresent
+              command: ["python3", "/scripts/backup.py", "--config", "/scripts/config.json", "--only", "navidrome"]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  # The snapshot is written to local disk, but the backup
+                  # API reads the live database through its 127 MB WAL, so
+                  # this job gets more headroom than the small ones.
+                  cpu: "1"
+                  memory: 1Gi
+              volumeMounts:
+                - name: nas
+                  mountPath: /backups
+                - name: datastore
+                  # Read-only: the backup must never write to the app's
+                  # live data, and a read-only mount also keeps SQLite
+                  # from trying to recover the WAL in place.
+                  mountPath: /navidrome
+                  readOnly: true
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+          volumes:
+            - name: nas
+              hostPath:
+                path: /mnt/nas-roms
+                type: Directory
+            - name: datastore
+              # The Navidrome PVC lives in the `navidrome` namespace and a
+              # PVC can only be mounted by a pod in the SAME namespace as
+              # the claim. This CronJob lives in the dedicated `backup`
+              # namespace, so the PVC cannot be mounted directly.
+              #
+              # Single-node k3s, local-path provisioner: the volume lives in
+              # a directory on the node and is mounted here read-only. The
+              # path embeds the PVC's UID, so it changes if the PVC is
+              # recreated; the engine then fails loudly on the missing
+              # database instead of archiving an empty directory.
+              #
+              # The mount point is the PVC ROOT: it holds navidrome.db and
+              # its -wal/-shm siblings, plus the artwork/, cache/ and
+              # backup/ subtrees. Only the database is backed up.
+              #
+              # Current value:
+              #   ./tools/backup/datastore-path.sh navidrome
+              hostPath:
+                path: /var/lib/rancher/k3s/storage/pvc-9be12842-5f3a-4939-a589-d59ffc33477a_navidrome_navidrome-data-pvc
+                type: Directory
+            - name: scripts
+              configMap:
+                name: backup-scripts
+                defaultMode: 0444

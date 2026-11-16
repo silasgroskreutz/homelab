@@ -26,20 +26,31 @@ by reading docs, and each silently produces a broken backup if ignored:
    it is copied to the share.
 
 Usage:
-    backup.py --config /scripts/config.json
+    backup.py --config /scripts/config.json [--only NAME ...]
+
+--only selects a subset of the configured apps. Every app has its own
+schedule, so each CronJob runs the SAME config file but only the apps it
+is responsible for. Without it, a run would back up every app at once.
 
 Config file (JSON):
 {
-  "dest": "/backups",
+  "dest": "/backups/Backups",
   "keep": 14,
   "apps": [
-    {"name": "linkding", "kind": "sqlite", "source": "/data/db.sqlite3"},
+    {"name": "changedetection", "kind": "tar", "source": "/datastore", "keep": 2},
     {"name": "bookorbit", "kind": "pgdump",
-     "host": "bookorbit-postgres", "user": "bookorbit", "database": "bookorbit"},
-    {"name": "navidrome", "kind": "navidrome", "source": "/data/navidrome.db"},
-    {"name": "komga", "kind": "tar", "source": "/config"}
+     "host": "bookorbit-postgres.bookorbit.svc.cluster.local",
+     "user": "bookorbit", "database": "bookorbit", "keep": 3},
+    {"name": "navidrome", "kind": "sqlite", "source": "/navidrome/navidrome.db", "keep": 3},
+    {"name": "linkding", "kind": "sqlite", "source": "/linkding/db.sqlite3", "keep": 3}
   ]
 }
+
+The paths above are the mount points inside the BACKUP pod, not the paths
+inside the application pod. Each application's PVC lives in the
+application's own namespace and a PVC can only be mounted by a pod in the
+same namespace, so the backup CronJob mounts the local-path directory of
+that PVC instead (see tools/backup/datastore-path.sh).
 
 5. The backup root is a SHARED tree. `dest` may point at a directory that
    also holds artifacts of other apps, so `prune()` only ever touches the
@@ -88,6 +99,34 @@ database) supports two extra keys:
                   start - the app's store.py does this for a missing
                   api_access_token / rss_access_token, the same way it
                   generates secret.txt.
+
+The "sqlite" kind takes a "verify" object as well:
+
+  "verify":              checks applied to the STAGED copy, before it is
+                         copied to the share:
+                           "integrity_check": run PRAGMA integrity_check
+                           "compare_tables":  tables whose row count in the
+                                            staged copy must equal the row
+                                            count in the live database
+
+                         The table COUNT and the table NAMES are always
+                         compared against the live database. The row counts
+                         are only compared for the tables named here,
+                         because a busy application writes to its database
+                         while the backup runs and a volatile table would
+                         then fail the run for the wrong reason. Name the
+                         tables that hold the state worth protecting and
+                         leave the churning ones out.
+
+  "keep":                how many artifacts of this app to retain. The
+                         top-level "keep" is the default for apps that do
+                         not set their own.
+
+Retention only ever deletes artifacts THIS ENGINE produced, which are the
+files matching `<app>-<UTC stamp><suffix>`. A file that somebody else put
+in the app's directory (a vendor's own backup, a manual test dump) is left
+alone and logged. A retention policy that deletes files it does not own is
+a data-loss bug wearing a housekeeping hat.
 """
 
 import argparse
@@ -147,14 +186,23 @@ def sha256(path: str) -> str:
     return digest.hexdigest()
 
 
-def open_source(path: str, name: str) -> sqlite3.Connection:
+def open_source(path: str, name: str, readonly: bool = False) -> sqlite3.Connection:
     """Open the live database for reading.
 
     Read-write is tried first because SQLite can then perform WAL recovery on
     a database whose previous writer crashed, which makes the backup a better
     artifact. It falls back to read-only when the file cannot be opened that
     way. Either way the backup API itself only reads from the source.
+
+    `readonly` forces the read-only URI. That matters for a datastore that
+    is mounted read-only: SQLite opens a WAL database read-write only if it
+    can also write the -shm sibling, and on a read-only mount it cannot.
     """
+    if readonly:
+        try:
+            return sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+        except sqlite3.Error as exc:
+            fail(f"{name}: cannot open source database {path} read-only: {exc}")
     try:
         return sqlite3.connect(path, timeout=30)
     except sqlite3.Error as exc:
@@ -165,12 +213,176 @@ def open_source(path: str, name: str) -> sqlite3.Connection:
             fail(f"{name}: cannot open source database {path}: {exc2}")
 
 
+def _copy_source_for_snapshot(source: str, workdir: str, name: str) -> str:
+    """Copy a source database and its WAL siblings onto local disk.
+
+    A read-only mount blocks SQLite from CREATING the -shm file it needs
+    before it can open a WAL-mode database. The failure is "unable to open
+    database file" even though the .db file itself is perfectly readable,
+    and it is what a WAL database without a -shm sibling hits (measured on
+    linkding's tasks.sqlite3, 2026-11-16).
+
+    Copying the .db and its -wal/-shm siblings to local disk gives SQLite a
+    writable directory to work in. The copy is a plain sequential write, so
+    it does not need the random-access I/O that the CIFS share cannot
+    serve.
+    """
+    local = os.path.join(workdir, f"{name}-source.db")
+    for leftover in (local, local + "-wal", local + "-shm"):
+        if os.path.exists(leftover):
+            os.remove(leftover)
+    shutil.copyfile(source, local)
+    copied = ["db"]
+    for suffix in ("-wal", "-shm"):
+        side = source + suffix
+        if os.path.exists(side):
+            shutil.copyfile(side, local + suffix)
+            copied.append(suffix)
+    log(f"{name}: copied the source to local disk ({', '.join(copied)}) "
+        f"because the datastore mount cannot be opened by SQLite directly")
+    return local
+
+
+def snapshot_sqlite(source: str, dest: str, name: str,
+                    workdir: str | None = None) -> None:
+    """Copy a live SQLite database into `dest` with the online backup API.
+
+    The API produces a transactionally consistent snapshot even while the
+    application is writing in WAL mode. This is the recommended approach for
+    hot SQLite databases; copying db+wal+shm by hand is not.
+
+    A plain file copy of the .db is NOT equivalent: the .db file is only
+    checkpointed occasionally, so a copy taken between checkpoints misses
+    everything that is still in the -wal. Measured on this cluster's
+    navidrome.db: the raw file held 1 user row while the live database held
+    2, because the second user lived only in the WAL.
+
+    Three attempts, in order:
+      1. open the source read-write, because a WAL database whose writer
+         crashed needs recovery to be readable and a read-only mount cannot
+         recover it,
+      2. open the source read-only,
+      3. copy the source onto local disk and snapshot the copy, which works
+         when the mount itself is the problem (read-only mount, or a WAL
+         database with no -shm sibling to open).
+    """
+    last_error: Exception | None = None
+    for readonly in (False, True):
+        src = open_source(source, name, readonly=readonly)
+        try:
+            dst = sqlite3.connect(dest)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+            return
+        except sqlite3.Error as exc:
+            last_error = exc
+            log(f"{name}: backup API failed ({exc}); retrying read-only")
+            for leftover in (dest, dest + "-wal", dest + "-shm"):
+                if os.path.exists(leftover):
+                    os.remove(leftover)
+        finally:
+            src.close()
+
+    if workdir:
+        local = _copy_source_for_snapshot(source, workdir, name)
+        src = open_source(local, name, readonly=False)
+        try:
+            dst = sqlite3.connect(dest)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+            return
+        except sqlite3.Error as exc:
+            last_error = exc
+            log(f"{name}: backup API failed on the local copy ({exc})")
+        finally:
+            src.close()
+
+    fail(f"{name}: sqlite backup API failed for {source}: {last_error}")
+
+
+def _table_names(conn: sqlite3.Connection, name: str) -> list:
+    """The user tables of a database, sorted."""
+    try:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        fail(f"{name}: cannot read the table list: {exc}")
+    return [row[0] for row in rows]
+
+
+def _count_rows(conn: sqlite3.Connection, table: str, name: str) -> int:
+    """Row count of one table, or a hard failure if it cannot be read."""
+    try:
+        return conn.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0]
+    except sqlite3.Error as exc:
+        fail(f"{name}: cannot count rows in table {table!r}: {exc}")
+
+
+def _live_table_names(conn: sqlite3.Connection, name: str) -> "list | None":
+    """The user tables of the LIVE database, or None if they cannot be read.
+
+    The live side of a comparison is read softly on purpose: the artifact is
+    still checked on its own, and a comparison that could not run is logged
+    rather than quietly skipped.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+    except sqlite3.Error as exc:
+        log(f"{name}: cannot read the live table list ({exc}); live comparison skipped")
+        return None
+    return [row[0] for row in rows]
+
+
+def open_live_soft(source: str, name: str) -> "sqlite3.Connection | None":
+    """Open the live database read-only, or None when it cannot be read.
+
+    This is only used for the live-vs-artifact comparison. A live database
+    that cannot be opened (the application is down, or the WAL needs a
+    recovery that a read-only mount cannot perform) must not abort the
+    backup: the artifact is still verified on its own, and a comparison that
+    could not run is logged rather than quietly skipped.
+    """
+    try:
+        return sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=30)
+    except sqlite3.Error as exc:
+        log(
+            f"{name}: live source {source} cannot be opened read-only ({exc}); "
+            f"live comparison skipped"
+        )
+        return None
+
+
 def stage_sqlite(app: dict, workdir: str) -> str:
-    """Produce a single self-contained, verified SQLite file on local disk."""
+    """Produce a single self-contained, verified SQLite file on local disk.
+
+    The artifact is checked against the LIVE database, not only for internal
+    consistency. A database that passes integrity_check but holds different
+    data than the running application is a backup of nothing, and it looks
+    exactly like a good backup on the share.
+
+    The table list and the table count are always compared. Row counts are
+    compared for the tables named in "compare_tables" only, because a busy
+    application writes while the backup runs and a volatile table would then
+    fail the run for the wrong reason.
+    """
     name = app["name"]
     source = app["source"]
     if not os.path.exists(source):
         fail(f"{name}: source database {source} does not exist")
+
+    verify = app.get("verify", "integrity_check")
+    if isinstance(verify, str):
+        verify = {"integrity_check": verify == "integrity_check"}
+    verify = verify or {}
 
     work = os.path.join(workdir, f"{name}.db")
     for leftover in (work, work + "-wal", work + "-shm"):
@@ -180,15 +392,7 @@ def stage_sqlite(app: dict, workdir: str) -> str:
     # The online backup API produces a transactionally consistent snapshot even
     # while the application is writing in WAL mode. This is the recommended
     # approach for hot SQLite databases; copying db+wal+shm by hand is not.
-    src = open_source(source, name)
-    try:
-        dst = sqlite3.connect(work)
-        try:
-            src.backup(dst)
-        finally:
-            dst.close()
-    finally:
-        src.close()
+    snapshot_sqlite(source, work, name, workdir)
 
     # The snapshot inherits the source's WAL journal mode. Convert it to a
     # rollback journal so the artifact is ONE file with no -wal/-shm siblings,
@@ -196,14 +400,59 @@ def stage_sqlite(app: dict, workdir: str) -> str:
     conn = sqlite3.connect(work)
     try:
         conn.execute("PRAGMA journal_mode=DELETE")
-        if app.get("verify", "integrity_check") == "integrity_check":
+        if verify.get("integrity_check", True):
             result = conn.execute("PRAGMA integrity_check").fetchone()[0]
             if result != "ok":
                 fail(f"{name}: integrity_check on staged copy returned {result!r}")
-            tables = conn.execute(
-                "SELECT count(*) FROM sqlite_master WHERE type='table'"
-            ).fetchone()[0]
-            log(f"verify: {name} integrity=ok tables={tables}")
+            log(f"verify: {name} integrity=ok")
+
+        tables = _table_names(conn, name)
+        if not tables:
+            fail(f"{name}: the staged copy holds no tables at all")
+        log(f"verify: {name} tables={len(tables)}")
+
+        live = open_live_soft(source, name)
+        if live is None:
+            log(f"{name}: live comparison not performed")
+        else:
+            try:
+                live_tables = _live_table_names(live, name)
+                if live_tables is None:
+                    pass
+                elif live_tables != tables:
+                    only_live = sorted(set(live_tables) - set(tables))
+                    only_staged = sorted(set(tables) - set(live_tables))
+                    fail(
+                        f"{name}: the staged copy has {len(tables)} tables but the "
+                        f"live database has {len(live_tables)} (only in live: "
+                        f"{only_live}, only in staged: {only_staged}) - the artifact "
+                        f"is not a copy of the live database"
+                    )
+                else:
+                    log(f"verify: {name} table list matches the live database")
+
+                    compare_tables = verify.get("compare_tables") or []
+                    if isinstance(compare_tables, str):
+                        compare_tables = [compare_tables]
+                    if not isinstance(compare_tables, (list, tuple)):
+                        fail(
+                            f"{name}: compare_tables must be a list of table names, "
+                            f"got {compare_tables!r}"
+                        )
+                    for table in list(compare_tables):
+                        staged_rows = _count_rows(conn, table, name)
+                        live_rows = _count_rows(live, table, name)
+                        if staged_rows != live_rows:
+                            fail(
+                                f"{name}: table {table!r} holds {staged_rows} rows in the "
+                                f"staged copy but {live_rows} in the live database"
+                            )
+                        log(
+                            f"verify: {name} table {table} rows={staged_rows} "
+                            f"matches the live database"
+                        )
+            finally:
+                live.close()
     finally:
         conn.close()
 
@@ -253,7 +502,19 @@ def stage_pgdump(app: dict, workdir: str) -> str:
 
 
 def stage_navidrome(app: dict, workdir: str) -> str:
-    """Use Navidrome's own backup CLI, which is the upstream-supported path."""
+    """Use Navidrome's own backup CLI, which is the upstream-supported path.
+
+    NOTE: the shared backup image does not ship the navidrome CLI. Measured
+    inside 192.168.0.101:5000/homelab-backup@sha256:42b1e010... (2026-11-16):
+    `command -v navidrome` exits 127, `navidrome --version` reports "not
+    found", and no navidrome binary exists anywhere in the image. This kind
+    therefore CANNOT be used with that image - it fails with "navidrome
+    backup create failed: [Errno 2] No such file or directory". Navidrome
+    is backed up with kind "sqlite" instead, which is where this function
+    ends up anyway: it re-snapshots the CLI's output through the SQLite
+    backup API for consistency. Using this kind requires an image that
+    carries the CLI.
+    """
     name = app["name"]
     work = os.path.join(workdir, f"{name}-cli")
     os.makedirs(work, exist_ok=True)
@@ -362,6 +623,34 @@ def redact_json_member(path: str, rel: str, spec: dict, name: str) -> tuple[byte
     return json.dumps(payload).encode("utf-8"), removed
 
 
+def _source_files(source: str, excludes: list) -> list:
+    """Every file under source that the archive would contain.
+
+    The same exclusion and symlink rules are applied here as in the archive
+    walk, so the number of files in the live source can be compared with the
+    number of files that ended up in the staged archive.
+    """
+    found = []
+    for dirpath, dirnames, filenames in os.walk(source):
+        dirnames.sort()
+        rel_dir = os.path.relpath(dirpath, source)
+        if rel_dir == ".":
+            rel_dir = ""
+        dirnames[:] = [
+            d for d in dirnames
+            if not _excluded(os.path.join(rel_dir, d) if rel_dir else d, excludes)
+        ]
+        for filename in sorted(filenames):
+            rel = os.path.join(rel_dir, filename) if rel_dir else filename
+            if _excluded(rel, excludes):
+                continue
+            full = os.path.join(dirpath, filename)
+            if os.path.islink(full):
+                continue
+            found.append((full, rel))
+    return found
+
+
 def stage_tar(app: dict, workdir: str) -> str:
     """Archive a directory of app state (no SQLite semantics required).
 
@@ -461,8 +750,36 @@ def stage_tar(app: dict, workdir: str) -> str:
                     tar.add(full, arcname=os.path.join(arcroot, rel))
                 added += 1
 
+    min_files = int(verify.get("min_files", 1))
+    allow_empty = bool(verify.get("allow_empty", False))
     if added == 0:
-        fail(f"{name}: archive would contain no files")
+        if allow_empty:
+            log(
+                f"{name}: the source holds no files - publishing an empty archive "
+                f"(allow_empty is set for this app)"
+            )
+        else:
+            fail(
+                f"{name}: archive would contain no files - a backup of an empty "
+                f"datastore is a successful run of a useless backup"
+            )
+    elif added < min_files:
+        fail(
+            f"{name}: archive would contain {added} file(s), expected at least "
+            f"{min_files} - the artifact does not match the live datastore"
+        )
+
+    # The archive must hold what the live source holds. A tar that silently
+    # missed files (a walk that stopped early, an exclusion that matched
+    # too much) looks exactly like a good backup.
+    if verify.get("compare_source_files"):
+        live_files = len(_source_files(source, excludes))
+        if live_files != added:
+            fail(
+                f"{name}: the archive holds {added} file(s) but the live source holds "
+                f"{live_files} - the artifact does not match the live datastore"
+            )
+        log(f"verify: {name} matches_live_source file_count={live_files}")
 
     size = os.path.getsize(work)
     if size == 0:
@@ -582,7 +899,7 @@ def stage_tar(app: dict, workdir: str) -> str:
     return work
 
 
-def publish(work: str, dest_dir: str, app_name: str, suffix: str) -> str:
+def publish(work: str, dest_dir: str, app_name: str, suffix: str) -> tuple:
     """Copy a staged artifact to the share and confirm it landed intact.
 
     A sequential copy is the only write mode that behaves on this share, so
@@ -591,6 +908,12 @@ def publish(work: str, dest_dir: str, app_name: str, suffix: str) -> str:
     The COPY is verified, not just the staged file: the artifact is read
     back from the share and its digest compared with the staged one. A
     backup that was never read back is an assumption.
+
+    Returns (path, digest, size). The digest is the one already computed
+    from the copy ON THE SHARE, so the caller does not have to read the
+    artifact back a second time. On this share that read is not cheap: the
+    82 MB Navidrome artifact takes minutes to read back, and reading it
+    twice doubled the runtime of the job.
     """
     size = os.path.getsize(work)
     staged_sha = sha256(work)
@@ -610,30 +933,51 @@ def publish(work: str, dest_dir: str, app_name: str, suffix: str) -> str:
         )
     log(f"{app_name}: published {target} ({copied} bytes on share)")
     log(f"{app_name}: copied: verified sha256={copied_sha[:16]} matches staged")
-    return target
+    return target, copied_sha, copied
 
 
 def prune(dest_root: str, managed: dict) -> None:
     """Keep the newest artifacts in the per-app directories this run owns.
 
-    Only the directories named in `managed` are touched. The backup root is
-    a shared NAS directory that also holds other apps' backups and unrelated
-    content, so a walk over everything under it would prune data this job
-    does not own. `managed` maps app name to its retention count.
+    Two scopes, both deliberate:
+
+    1. Only the directories named in `managed` are touched. The backup root
+       is a shared NAS directory that also holds other apps' backups and
+       unrelated content, so a walk over everything under it would prune
+       data this job does not own.
+
+    2. Inside an app's directory, only the files THIS ENGINE produced are
+       eligible for deletion: they match `<app>-<UTC stamp><suffix>`. A file
+       that somebody else put there (a vendor's own backup, a manual test
+       dump) is left alone and logged. Retention that deletes files it does
+       not own is a data-loss bug wearing a housekeeping hat.
+
+    Artifacts are ordered by the stamp in their name, not by mtime: mtime on
+    a CIFS share is not trustworthy enough to decide what to delete.
     """
-    for app, keep in sorted(managed.items()):
+    for app, spec in sorted(managed.items()):
+        keep = int(spec.get("keep", 0))
+        suffix = spec.get("suffix", "")
         if keep <= 0:
             continue
         app_dir = os.path.join(dest_root, app)
         if not os.path.isdir(app_dir):
             continue
-        paths = [
-            os.path.join(app_dir, name)
-            for name in os.listdir(app_dir)
-            if os.path.isfile(os.path.join(app_dir, name))
-        ]
-        paths.sort(key=os.path.getmtime, reverse=True)
-        for stale in paths[keep:]:
+        pattern = re.compile(
+            rf"^{re.escape(app)}-(\d{{8}}T\d{{6}}Z){re.escape(suffix)}$"
+        )
+        owned = []
+        for name in sorted(os.listdir(app_dir)):
+            full = os.path.join(app_dir, name)
+            if not os.path.isfile(full):
+                continue
+            match = pattern.match(name)
+            if match:
+                owned.append((match.group(1), full))
+            else:
+                log(f"prune: kept {app}/{name} (not produced by this backup job)")
+        owned.sort(reverse=True)
+        for _, stale in owned[keep:]:
             try:
                 os.remove(stale)
                 log(f"prune: removed {app}/{os.path.basename(stale)}")
@@ -644,6 +988,15 @@ def prune(dest_root: str, managed: dict) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Back up only the named app(s). Repeatable. Retention is "
+             "scoped to the selected apps as well, so one app's job never "
+             "prunes another app's artifacts.",
+    )
     args = parser.parse_args()
 
     with open(args.config) as handle:
@@ -653,11 +1006,25 @@ def main() -> None:
     keep = int(config.get("keep", 14))
     workdir = config.get("workdir", "/tmp/backup-work")
 
+    apps = list(config["apps"])
+    if args.only:
+        known = {app["name"] for app in apps}
+        unknown = [name for name in args.only if name not in known]
+        if unknown:
+            fail(
+                f"--only names apps that are not in the configuration: {unknown} "
+                f"(configured apps: {sorted(known)})"
+            )
+        wanted = set(args.only)
+        apps = [app for app in apps if app["name"] in wanted]
+        log(f"selected apps: {', '.join(app['name'] for app in apps)}")
+
     os.makedirs(workdir, exist_ok=True)
     ensure_dir(dest_root)
 
-    results: list[str] = []
-    for app in config["apps"]:
+    results: list[tuple] = []
+    suffixes: dict = {}
+    for app in apps:
         kind = app.get("kind")
         name = app["name"]
         dest_dir = ensure_dir(os.path.join(dest_root, name))
@@ -675,19 +1042,26 @@ def main() -> None:
             suffix = ".tar.gz"
         else:
             fail(f"{name}: unknown kind {kind!r}")
+        suffixes[name] = suffix
         results.append(publish(work, dest_dir, name, suffix))
 
-    # Retention applies ONLY to the apps this configuration manages. The
-    # backup root may be shared with other apps' backups, so pruning is
-    # scoped rather than a walk over the whole destination.
+    # Retention applies ONLY to the apps this run was responsible for. The
+    # backup root is a shared NAS directory that also holds other apps'
+    # backups, so pruning is scoped rather than a walk over the whole
+    # destination - and inside an app's directory it only ever deletes the
+    # artifacts this engine produced.
     managed = {
-        app["name"]: int(app.get("keep", keep)) for app in config["apps"]
+        app["name"]: {
+            "keep": int(app.get("keep", keep)),
+            "suffix": suffixes[app["name"]],
+        }
+        for app in apps
     }
     prune(dest_root, managed)
 
     log(f"done: {len(results)} artifact(s) written under {dest_root}")
-    for path in results:
-        log(f"  {path} ({os.path.getsize(path)} bytes) sha256={sha256(path)[:16]}")
+    for path, digest, size in results:
+        log(f"  {path} ({size} bytes) sha256={digest[:16]}")
 
 
 if __name__ == "__main__":

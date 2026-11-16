@@ -3,4 +3,11 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - configmap.yaml
-  - cronjob.yaml
+  # One CronJob per application. Each app has its own schedule, its own
+  # datastore mount and its own --only selection, so one app's job can
+  # never back up or prune another app's artifacts.
+  - cronjob-changedetection.yaml
+  - cronjob-linkding.yaml
+  - cronjob-navidrome.yaml
+  - cronjob-bookorbit.yaml
+  - serviceaccount-bookorbit.yaml

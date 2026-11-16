@@ -50,7 +50,10 @@ spec:
             - name: backup
               image: 192.168.0.101:5000/homelab-backup@sha256:42b1e01087ed854d6130646b6765b668704ebc07e8ac9fd876cbbdc9d5d2e4e8
               imagePullPolicy: IfNotPresent
-              command: ["python3", "/scripts/backup.py", "--config", "/scripts/config.json"]
+              # --only because every app in the configuration has its own
+              # CronJob and its own schedule. Without it this job would
+              # back up every configured app at 04:23.
+              command: ["python3", "/scripts/backup.py", "--config", "/scripts/config.json", "--only", "changedetection"]
               resources:
                 requests:
                   cpu: 50m
@@ -99,7 +102,7 @@ spec:
               # of silently archiving an empty directory.
               #
               # Current value:
-              #   ./tools/backup/datastore-path.sh
+              #   ./tools/backup/datastore-path.sh changedetection
               hostPath:
                 path: /var/lib/rancher/k3s/storage/pvc-a1c470dd-1194-4ff4-9e17-4b12933f53ff_changedetection_changedetection-data-pvc
                 type: Directory

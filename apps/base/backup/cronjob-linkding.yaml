@@ -1,0 +1,90 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: linkding-backup
+spec:
+  # 00:37 every day. The Linkding artifacts are small (a 221 KB database,
+  # a 29 KB task queue and an assets archive that is empty until someone
+  # uploads a bookmark asset), so this is the cheapest job of the four and
+  # it takes the first quiet slot of the night.
+  #
+  # It sits two hours clear of the BookOrbit job (02:17) and four hours
+  # clear of changedetection (04:23). The odd minute avoids the on-the-hour
+  # and 03:00 spikes - 03:00:00 is the minute the entire fleet of cron jobs
+  # on the internet wakes up at once.
+  schedule: "37 0 * * *"
+  timeZone: "America/Chicago"
+  # Forbid guards this job against itself. The other backup jobs are
+  # scheduled in different hours, so they never overlap this one either.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            # Mandatory for the CIFS share, see the changedetection job.
+            runAsUser: 1000
+            runAsGroup: 0
+            fsGroup: 1000
+          containers:
+            - name: backup
+              image: 192.168.0.101:5000/homelab-backup@sha256:42b1e01087ed854d6130646b6765b668704ebc07e8ac9fd876cbbdc9d5d2e4e8
+              imagePullPolicy: IfNotPresent
+              # Three apps, one pod, one schedule: the two databases and
+              # the file-backed data folder. They share one datastore mount
+              # and are tiny, so they run back to back in the same job
+              # instead of in three jobs writing to the same share at the
+              # same minute.
+              command: ["python3", "/scripts/backup.py", "--config", "/scripts/config.json", "--only", "linkding", "--only", "linkding-data"]
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 64Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              volumeMounts:
+                - name: nas
+                  mountPath: /backups
+                - name: datastore
+                  # Read-only: the backup must never write to the app's
+                  # live data. The SQLite backup API only reads from the
+                  # source, and on a read-only mount it cannot create the
+                  # -wal/-shm siblings a read-write open would want.
+                  mountPath: /linkding
+                  readOnly: true
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+          volumes:
+            - name: nas
+              hostPath:
+                path: /mnt/nas-roms
+                type: Directory
+            - name: datastore
+              # The Linkding PVC lives in the `linkding` namespace and a
+              # PVC can only be mounted by a pod in the SAME namespace as
+              # the claim. This CronJob lives in the dedicated `backup`
+              # namespace, so the PVC cannot be mounted directly.
+              #
+              # Single-node k3s, local-path provisioner: the volume lives in
+              # a directory on the node and is mounted here read-only. The
+              # path embeds the PVC's UID, so it changes if the PVC is
+              # recreated; the engine then fails loudly on the missing
+              # datastore instead of archiving an empty directory.
+              #
+              # Current value:
+              #   ./tools/backup/datastore-path.sh linkding
+              hostPath:
+                path: /var/lib/rancher/k3s/storage/pvc-0896f270-69e4-4acb-8a1e-4195a59b229c_linkding_linkding-data-pvc
+                type: Directory
+            - name: scripts
+              configMap:
+                name: backup-scripts
+                defaultMode: 0444
