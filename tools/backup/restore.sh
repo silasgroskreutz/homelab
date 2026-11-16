@@ -365,11 +365,13 @@ p = os.path.join(sys.argv[1], "url-watches.json")
 try:
     with open(p) as fh:
         data = json.load(fh)
+    if not isinstance(data, dict):
+        print("ERR:not-a-json-object")
+    else:
+        w = data.get("watching")
+        print("ERR:not-an-object" if not isinstance(w, dict) else str(len(w)))
 except Exception as exc:
     print("ERR:" + str(exc))
-    raise SystemExit(0)
-w = data.get("watching")
-print("ERR:not-an-object" if not isinstance(w, dict) else str(len(w)))
 PY
 }
 
@@ -385,11 +387,13 @@ p = os.path.join(sys.argv[1], "url-watches.json")
 try:
     with open(p) as fh:
         data = json.load(fh)
+    if not isinstance(data, dict):
+        print("ERR:not-a-json-object")
+    else:
+        w = data.get("watching")
+        print("ERR:not-an-object" if not isinstance(w, dict) else str(len(w)))
 except Exception as exc:
     print("ERR:" + str(exc))
-    raise SystemExit(0)
-w = data.get("watching")
-print("ERR:not-an-object" if not isinstance(w, dict) else str(len(w)))
 PY
 )"
       fi
