@@ -156,7 +156,9 @@ No architecture was chosen and none should be built before a device exists.
 - [ ] Service accounts for the remaining apps you keep (linkding, komga, homarr)
 
 **Needs a decision first**
-- [ ] Voice architecture: A, B, or C
+- [ ] Kanban board LAN exposure model (the plugin routes bypass auth by design)
+- [ ] Whether the Karakeep rule engine or Hermes does the source/tag filtering
+- [ ] How aggressive overnight deploys are allowed to be
 - [ ] Where automation's "ask first" line sits
 - [ ] Whether Mealie/Audiobookshelf get replaced, or merely left alone
 
