@@ -60,6 +60,34 @@ database) supports two extra keys:
                      "min_count":   minimum number of records (default 1)
                      "compare_source": also count the live source and log
                      whether the two agree
+
+  "redact":       credential keys stripped from a JSON member before it is
+                  archived. Each spec names the member (relative to the
+                  source root), the dotted path to the object holding the
+                  credentials, and the keys to remove:
+
+                    [{"member": "url-watches.json",
+                      "path": "settings.application",
+                      "keys": ["api_access_token", "rss_access_token"]}]
+
+                  The point is that changedetection.io stores its API and
+                  RSS bearer tokens INSIDE the datastore JSON. The API token
+                  is accepted on the write routes too, and the backup target
+                  is a CIFS share that also holds Books, Movies and Music -
+                  not a secret store.
+
+                  The removed VALUES are remembered and the finished archive
+                  is scanned for them, so a token that also lives in another
+                  member is caught rather than published. The redaction is
+                  fail-CLOSED: an unreadable member, unparseable JSON, a
+                  missing key path, or a spec that matches no member all
+                  fail the whole backup run. A redaction that silently did
+                  nothing would look exactly like one that worked.
+
+                  A restored instance regenerates its own tokens on first
+                  start - the app's store.py does this for a missing
+                  api_access_token / rss_access_token, the same way it
+                  generates secret.txt.
 """
 
 import argparse
@@ -67,6 +95,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -284,6 +313,55 @@ def _excluded(relpath: str, patterns: list) -> bool:
     return False
 
 
+def redact_json_member(path: str, rel: str, spec: dict, name: str) -> tuple[bytes, set]:
+    """Return the member's bytes with the configured credential keys removed.
+
+    The removed VALUES are returned as well, so the caller can prove they do
+    not appear anywhere in the finished archive.
+
+    This fails the whole run rather than falling back to the original file.
+    A redaction that silently does not happen is worse than no redaction at
+    all: it looks like it worked, and the credential lands on the share.
+    So an unreadable member, unparseable JSON, or a missing key path is a
+    hard error, not a warning.
+    """
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        fail(f"{name}: cannot read {rel} for redaction: {exc}")
+
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        fail(f"{name}: cannot parse {rel} as JSON for redaction: {exc}")
+
+    parts = spec["path"].split(".")
+    cursor = payload
+    for part in parts:
+        if not isinstance(cursor, dict) or part not in cursor:
+            fail(
+                f"{name}: redaction path {spec['path']!r} is not present in "
+                f"{rel} (stops at {part!r}) - refusing to publish it "
+                f"unredacted"
+            )
+        cursor = cursor[part]
+    if not isinstance(cursor, dict):
+        fail(f"{name}: redaction path {spec['path']!r} in {rel} is not an object")
+
+    removed: set = set()
+    for key in spec["keys"]:
+        if key not in cursor:
+            # Already absent (the app may not have generated it yet). Nothing
+            # to strip, and nothing to leak.
+            continue
+        value = cursor.pop(key)
+        if isinstance(value, str) and value:
+            removed.add(value.encode("utf-8"))
+
+    return json.dumps(payload).encode("utf-8"), removed
+
+
 def stage_tar(app: dict, workdir: str) -> str:
     """Archive a directory of app state (no SQLite semantics required).
 
@@ -310,9 +388,23 @@ def stage_tar(app: dict, workdir: str) -> str:
     # When specified, the listed keys are deleted from the target JSON member
     # before archiving. The app stores these as credentials; keeping them out
     # of the published artifact lets restored instances generate fresh tokens
-    # on first start (precedent: secret.txt is excluded entirely).
-    redact = app.get("redact", []) or []
-    _redacted_secrets = set()
+    # on first start (precedent: secret.txt is excluded entirely, and the
+    # app's own store.py regenerates a missing token on startup).
+    #
+    # Keyed by source-relative member path so the lookup is exact. A spec
+    # naming a member that is not in the source is a configuration error and
+    # is checked below, so a typo cannot silently disable redaction.
+    redact_specs = list(app.get("redact", []) or [])
+    redact: dict = {}
+    for spec in redact_specs:
+        member = spec.get("member")
+        if not member:
+            fail(f"{name}: a redact spec has no 'member' key: {spec!r}")
+        if member in redact:
+            fail(f"{name}: two redact specs target the same member {member!r}")
+        redact[member] = spec
+    redacted_secrets: set = set()
+    redacted_members: set = set()
     arcroot = os.path.basename(source.rstrip("/"))
 
     work = os.path.join(workdir, f"{name}.tar.gz")
@@ -342,47 +434,30 @@ def stage_tar(app: dict, workdir: str) -> str:
                     log(f"{name}: skipped symlink {rel}")
                     continue
 
-                # Redact JSON members that contain credentials
-                redacted = False
-                for spec in redact:
-                    if rel == spec["member"]:
-                        try:
-                            with open(full) as fh:
-                                payload = json.load(fh)
-                            # Delete the listed keys at the dotted path
-                            parts = spec["path"].split(".")
-                            cur = payload
-                            ok = True
-                            for p in parts[:-1]:
-                                if isinstance(cur, dict) and p in cur:
-                                    cur = cur[p]
-                                else:
-                                    ok = False
-                                    break
-                            if ok and isinstance(cur, dict) and parts[-1] in cur:
-                                removed = []
-                                for k in spec["keys"]:
-                                    if k in cur:
-                                        removed.append(cur.pop(k))
-                                # Write redacted JSON to a temp file in workdir
-                                tmp_path = os.path.join(
-                                    workdir, f".redacted_{os.path.basename(rel)}"
-                                )
-                                with open(tmp_path, "w") as fh:
-                                    json.dump(payload, fh)
-                                tar.add(tmp_path, arcname=os.path.join(arcroot, rel))
-                                os.remove(tmp_path)
-                                # Remember the original secret values for leak check
-                                for v in removed:
-                                    if isinstance(v, str) and v:
-                                        _redacted_secrets.add(v.encode())
-                            redacted = True
-                            log(f"{name}: redacted {rel} keys={spec['keys']}")
-                            break
-                        except (json.JSONDecodeError, Exception) as e:
-                            log(f"{name}: redaction warning for {rel}: {e}")
-                            break
-                if not redacted:
+                # Redact JSON members that carry credentials. A redaction
+                # that cannot be applied is a hard failure of the whole
+                # run: shipping the unredacted member would put the
+                # credential back on the share, which is the exact thing
+                # this code exists to prevent.
+                spec = redact.get(rel)
+                if spec is not None:
+                    data, removed = redact_json_member(full, rel, spec, name)
+                    redacted_secrets.update(removed)
+                    redacted_members.add(rel)
+                    tmp_path = os.path.join(
+                        workdir, f".redacted_{os.path.basename(rel)}"
+                    )
+                    with open(tmp_path, "wb") as handle:
+                        handle.write(data)
+                    try:
+                        tar.add(tmp_path, arcname=os.path.join(arcroot, rel))
+                    finally:
+                        os.remove(tmp_path)
+                    log(
+                        f"{name}: redacted {rel} "
+                        f"keys={spec['keys']} removed={len(removed)}"
+                    )
+                else:
                     tar.add(full, arcname=os.path.join(arcroot, rel))
                 added += 1
 
@@ -454,23 +529,54 @@ def stage_tar(app: dict, workdir: str) -> str:
 
     log(f"verify: {name} archive_ok members={len(members)} bytes={size}")
 
-    # Leak check: ensure redacted secret values do not appear anywhere in
-    # the staged archive. The archive member bytes are scanned for the
-    # original secret values that were removed from url-watches.json.
-    if _redacted_secrets:
-        with tarfile.open(work, "r:gz") as tar:
-            for member in tar.getmembers():
-                if not member.isfile():
-                    continue
-                f = tar.extractfile(member)
-                if f is None:
-                    continue
-                data = f.read()
-                for secret in _redacted_secrets:
-                    if secret in data:
+    # Every configured redact spec must have matched a member. A spec that
+    # matched nothing means the config is wrong (wrong member name, wrong
+    # source layout) and the credential would have shipped untouched.
+    unmatched = sorted(set(redact) - set(redacted_members))
+    if unmatched:
+        fail(
+            f"{name}: these redact specs matched no member in the source: "
+            f"{unmatched} - the credential would not have been removed"
+        )
+
+    # Leak check. Two independent checks:
+    #
+    #   1. the exact secret values that were removed must not appear
+    #      anywhere in the archive (e.g. copied into another member);
+    #   2. no member may still carry a configured credential KEY with a
+    #      non-empty string value. This catches the case where the same
+    #      credential lives in a second file that redaction never touched.
+    #
+    # Both run on the STAGED archive, before anything reaches the share.
+    credential_keys = {
+        key
+        for spec in redact.values()
+        for key in spec.get("keys", [])
+    }
+    with tarfile.open(work, "r:gz") as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            handle = tar.extractfile(member)
+            if handle is None:
+                continue
+            data = handle.read()
+            for secret in redacted_secrets:
+                if secret in data:
+                    fail(
+                        f"{name}: redacted secret value found in archive "
+                        f"member {member.name}"
+                    )
+            text = data.decode("utf-8", "replace")
+            for key in credential_keys:
+                for match in re.finditer(
+                    r'"' + re.escape(key) + r'"\s*:\s*"([^"]*)"', text
+                ):
+                    if match.group(1):
                         fail(
-                            f"{name}: redacted secret value found in archive "
-                            f"member {member.name}"
+                            f"{name}: credential key {key!r} with a non-empty "
+                            f"value is still present in archive member "
+                            f"{member.name}"
                         )
 
     return work
