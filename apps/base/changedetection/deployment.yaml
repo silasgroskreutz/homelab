@@ -4,12 +4,23 @@ metadata:
   name: changedetection
 spec:
   replicas: 1
-  # Recreate, not the default RollingUpdate. The datastore is a SQLite file
-  # on the PVC, so two pods must never hold it at the same time. A rolling
-  # update would start the new pod (maxSurge 1) BEFORE the old one releases
-  # the ReadWriteOnce volume, giving two writers on one database file.
+  # The datastore is a SQLite file on the PVC, so two pods must never hold
+  # it at the same time. A default rolling update starts the new pod
+  # (maxSurge 1) BEFORE the old one releases the ReadWriteOnce volume,
+  # giving two writers on one database file. maxSurge 0 + maxUnavailable 1
+  # guarantees the old pod fully terminates before the new one starts.
+  #
+  # This is expressed as RollingUpdate with zero surge rather than
+  # `type: Recreate` because the live Deployment already has
+  # spec.strategy.rollingUpdate populated, and the API server rejects
+  # switching type to Recreate while that field is set
+  # ("may not be specified when strategy `type` is 'Recreate'"). That
+  # rejection fails the whole apps Kustomization, not just this app.
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: changedetection
