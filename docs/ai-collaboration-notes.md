@@ -165,3 +165,38 @@ No architecture was chosen and none should be built before a device exists.
 **Deliberately not doing**
 - [ ] Administering Mealie or Audiobookshelf
 - [ ] Anything that spends money or publishes under your name
+
+## Kanban deploy pipeline — operational state (2026-11-16)
+
+The Hermes Kanban board is the working intake-to-deployment surface. A new
+skill, `kanban-deploy-pipeline`, holds the full procedure.
+
+**Board:** `deploy-pipeline` ("Deploy Pipeline"). Columns:
+`triage -> todo -> ready -> running -> blocked -> review -> done`, plus a
+parked `Scheduled` state for work waiting on time rather than a person.
+
+**Role separation:** `scout` (research only), `builder` (implement + deploy),
+`auditor` (verify only), `operator` (recurring ops). All four were broken by a
+shared provider-config error — `provider: nous` + bare `model: minimax`
+returns `HTTP 404: Model 'minimax' not found` on every call. Fixed by routing
+all lanes to `provider: minimax` / `MiniMax-M2.7` at
+`https://api.minimax.io/anthropic`, and by giving each role profile its own
+`.env`. Every profile now passes a live smoke prompt.
+
+**Review gate.** "No role completes its own work" is enforced structurally by
+*child cards*, not by prompt wording. A builder card gets a pre-created
+auditor child; the builder's `kanban_complete` is what releases the auditor.
+Same-card review is available via `kanban_request_review` + a named reviewer
+profile, with `kanban_reopen-review` to send it back.
+
+**First real runs.** `pshenok/server-survival` triaged **SOMEDAY** — a
+client-side-only Three.js browser game with no backend, no image, and no
+manifests. Deploying it means hand-authoring an nginx image and manifests to
+serve a copy of a site GitHub Pages already hosts free, so it yields no
+infrastructure learning; its real value is the `src/sim/` cloud-pattern
+models and 593+ tests, available at zero cost. Parked, not archived.
+
+**Open:** the dashboard still binds `0.0.0.0` and is reachable over Tailscale
+(`100.66.110.98:9119`). The launchd plist is staged to bind `192.168.0.105`
+instead, which keeps LAN access and drops Tailscale, but the reload needs an
+approved service restart.
