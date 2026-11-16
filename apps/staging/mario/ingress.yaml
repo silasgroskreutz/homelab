@@ -1,0 +1,38 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mario
+  annotations:
+    # The public hostname must match this DNS record, or Traefik serves its
+    # default certificate and the client sees a TLS error.
+    #
+    # NOTE: the DNS record for mario.silasgroskreutz.com is a human-gated
+    # step and does not exist yet. The certificate will stay NotReady until
+    # the record is created. That does NOT affect reachability: the app
+    # answers on the node's Traefik ingress (port 80) with a Host header
+    # regardless of DNS.
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  # DEFECT CORRECTED (upstream had no Ingress at all).
+  #
+  # Upstream exposed the app with a type: LoadBalancer Service on port 80,
+  # which collides with the Traefik LoadBalancer that already holds node
+  # ports 80:32120 and 443:32397. The app is now a ClusterIP Service
+  # reached through a Traefik Ingress, which is the pattern every other
+  # app in this repo uses.
+  ingressClassName: traefik
+  rules:
+    - host: mario.silasgroskreutz.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mario
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - mario.silasgroskreutz.com
+      secretName: mario-tls

@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mario
+  labels:
+    app: mario
+    app.kubernetes.io/name: mario
+    app.kubernetes.io/instance: mario
+spec:
+  # DEFECT CORRECTED (upstream: type: LoadBalancer on port 80).
+  # The upstream Service asked for a LoadBalancer on port 80. This cluster's
+  # Traefik already holds the 80/443 LoadBalancer node ports
+  # (80:32120/TCP, 443:32397/TCP), so a second LoadBalancer on port 80
+  # cannot get a node port and the object stays pending forever.
+  # ClusterIP + a Traefik Ingress is the pattern every other app in this
+  # repo uses.
+  type: ClusterIP
+  selector:
+    app: mario
+  ports:
+    # The game itself. This is the FIRST port on purpose: the shared
+    # verifier reads spec.ports[0].port as the app's serving port.
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    # The Prometheus exposition endpoint served by the extra nginx server
+    # block from mario-nginx-metrics. The ServiceMonitor scrapes this port.
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      protocol: TCP

@@ -1,0 +1,82 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mario-network-policy
+  labels:
+    app: mario
+    app.kubernetes.io/name: mario
+    app.kubernetes.io/instance: mario
+spec:
+  podSelector:
+    matchLabels:
+      app: mario
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # DEFECT CORRECTED (upstream: namespaceSelector matchLabels {name: default}).
+    #
+    # The upstream policy allowed ingress only from namespaces labelled
+    # "name: default". No namespace in this cluster carries that label (the
+    # default namespace itself has no labels at all), so the rule matched
+    # NOTHING — including the Traefik pod that actually serves the app.
+    # The app would have been unreachable through its Ingress while the pod
+    # sat there looking perfectly healthy.
+    #
+    # Ingress is now allowed from the real requester: the Traefik pod in
+    # kube-system, on the port Traefik forwards to.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+      ports:
+        - protocol: TCP
+          port: 80
+    # Prometheus scrapes the ServiceMonitor endpoint. The Prometheus pod lives
+    # in the monitoring namespace and scrapes the pod port directly, so the
+    # metrics port has to be reachable from there or the target shows up
+    # DOWN in Prometheus even though the ServiceMonitor object exists.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # DEFECT CORRECTED (upstream: egress only to the {name: default} selector).
+    #
+    # The upstream egress rules permitted DNS/80/443 ONLY to namespaces
+    # labelled "name: default" — which matches nothing. The result was a
+    # NetworkPolicy that blocked the pod's own DNS resolution: the pod stays
+    # Running, the Service keeps its endpoints, and the only symptom is that
+    # requests hang or fail. That is a silent outage.
+    #
+    # DNS egress now points at the cluster's actual DNS service, the
+    # kube-dns pods in kube-system, on both UDP and TCP port 53.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Upstream also permitted 80/443 egress. The game is a static site, so
+    # nothing in the server path needs it, but the upstream intent is kept
+    # rather than silently narrowed.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443

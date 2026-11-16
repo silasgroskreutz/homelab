@@ -1,0 +1,50 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mario-service-monitor
+  labels:
+    # DEFECT CORRECTED (upstream used a different release label).
+    #
+    # This cluster's Prometheus CR
+    # (monitoring/kube-prometheus-stack-prometheus) selects ServiceMonitors
+    # with:
+    #   serviceMonitorSelector:
+    #     matchLabels:
+    #       release: kube-prometheus-stack
+    # A ServiceMonitor carrying any other label is silently ignored: the
+    # object exists in the cluster, Prometheus never generates a scrape job
+    # for it, and the dashboard shows nothing wrong. This label MUST be
+    # release: kube-prometheus-stack.
+    release: kube-prometheus-stack
+    app: mario
+    app.kubernetes.io/name: mario
+    app.kubernetes.io/instance: mario
+spec:
+  # DEFECT CORRECTED (upstream pointed at the default namespace).
+  #
+  # The upstream ServiceMonitor selected services in the `default`
+  # namespace. This app's Service lives in the `mario` namespace, so the
+  # selector matched nothing. The namespace here is the mario namespace.
+  namespaceSelector:
+    matchNames:
+      - mario
+  selector:
+    matchLabels:
+      app: mario
+  endpoints:
+    # Upstream scraped "/" on the Service's port 80. That path serves the
+    # game's index.html — HTML is not a Prometheus exposition format, so the
+    # scrape fails and the target is reported DOWN even though the
+    # ServiceMonitor object exists.
+    #
+    # The port below is the `metrics` port of the mario Service, which
+    # forwards to the extra nginx server block (mario-nginx-metrics
+    # ConfigMap) that serves a valid text/plain exposition format.
+    - port: metrics
+      path: /metrics
+      # The scheme values are lowercase "http"/"https". The uppercase
+      # "HTTP" is rejected by the CRD with:
+      #   spec.endpoints[0].scheme: Unsupported value: "HTTP"
+      scheme: http
+      interval: 30s
+      scrapeTimeout: 10s

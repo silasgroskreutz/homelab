@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mario-nginx-metrics
+  labels:
+    app: mario
+    app.kubernetes.io/name: mario
+    app.kubernetes.io/instance: mario
+data:
+  metrics.conf: |
+    # Additional nginx server block that exposes Prometheus metrics.
+    #
+    # WHY THIS EXISTS: the upstream project has no metrics endpoint at all.
+    # Its ServiceMonitor scrapes "/" of the game, which returns HTML.
+    # Prometheus cannot parse HTML as an exposition format, so the scrape
+    # fails and the target is reported as down even though the ServiceMonitor
+    # object exists. This block serves a valid text/plain exposition
+    # format instead, using the connection counters that the upstream
+    # image's nginx already exposes as variables (the image is built with
+    # --with-http_stub_status_module). No sidecar exporter and no extra
+    # image to pull.
+    #
+    # ONLY variables that exist in this nginx build are used. The image's
+    # nginx 1.25.3 exposes $connections_active / $connections_reading /
+    # $connections_writing / $connections_waiting (the stub_status module
+    # variables). It does NOT expose $requests_total or $requests_active —
+    # those are nginx-prometheus-exporter variables, and referencing them
+    # makes nginx refuse to start with:
+    #   [emerg] unknown "requests_total" variable
+    # Verified against this exact image digest locally.
+    server {
+        listen       8080;
+        server_name  _;
+
+        access_log off;
+
+        location = /metrics {
+            default_type text/plain;
+            return 200 "# HELP mario_nginx_connections_active Current number of active nginx connections.\n# TYPE mario_nginx_connections_active gauge\nmario_nginx_connections_active $connections_active\n# HELP mario_nginx_connections_reading Current number of connections nginx is reading a request from.\n# TYPE mario_nginx_connections_reading gauge\nmario_nginx_connections_reading $connections_reading\n# HELP mario_nginx_connections_writing Current number of connections nginx is writing a response to.\n# TYPE mario_nginx_connections_writing gauge\nmario_nginx_connections_writing $connections_writing\n# HELP mario_nginx_connections_waiting Current number of idle keep-alive connections.\n# TYPE mario_nginx_connections_waiting gauge\nmario_nginx_connections_waiting $connections_waiting\n# HELP mario_nginx_info Information about the nginx instance serving the Super Mario game.\n# TYPE mario_nginx_info gauge\nmario_nginx_info{version=\"$nginx_version\"} 1\n";
+        }
+    }

@@ -1,0 +1,55 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mario-hpa
+  labels:
+    app: mario
+    app.kubernetes.io/name: mario
+    app.kubernetes.io/instance: mario
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mario
+  minReplicas: 3
+  # Upstream used maxReplicas: 10. Lowered to 6.
+  #
+  # Reason: this is a single node (prodesk1) with 4 CPU / ~16 GB
+  # allocatable, and the upstream replicas serve a static site that
+  # essentially never needs more than the minimum. At 10 replicas the
+  # container limits alone would claim 10 x 500m = 5 CPU (more than the
+  # node has) and 10 x 512Mi = 5 GiB of memory on top of the ~46 % of
+  # memory already in use. Six replicas caps the worst case at 3 CPU /
+  # 3 GiB of limits and 600m CPU / 768Mi of requests, which fits with
+  # room to spare.
+  maxReplicas: 6
+  metrics:
+    # CPU utilisation is measured against the container's CPU *request*
+    # (100m), so a target of 70 % means the pods are using ~70m CPU on
+    # average. nginx serving static files stays far below that, so the HPA
+    # will normally sit at minReplicas and only grow under real load.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60

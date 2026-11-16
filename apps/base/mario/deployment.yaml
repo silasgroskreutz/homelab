@@ -1,0 +1,154 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mario
+  labels:
+    app: mario
+    app.kubernetes.io/name: mario
+    app.kubernetes.io/instance: mario
+spec:
+  # Upstream used 3 replicas. Kept: nginx serves static files from the image
+  # layer, so a replica costs ~10 MB RSS. Three replicas also means a
+  # rolling update never drops the app to zero ready endpoints.
+  replicas: 3
+  # Upstream strategy, kept as-is. maxSurge 1 / maxUnavailable 0 means a
+  # rollout briefly runs a 4th pod. That is affordable here: the 4th pod
+  # requests 100m CPU / 128Mi memory and the node has 4 CPU / ~16 GB
+  # allocatable with ~3.5 CPU free.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: mario
+  template:
+    metadata:
+      labels:
+        app: mario
+        app.kubernetes.io/name: mario
+        app.kubernetes.io/instance: mario
+      annotations:
+        # Point the annotation-based scrape at the real metrics endpoint.
+        # Upstream pointed these at "/" on port 80, which returns the game's
+        # HTML and cannot be parsed as a Prometheus exposition format.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+        # Bump this when the nginx metrics ConfigMap changes, or the pods
+        # keep serving the old config.
+        checksum/config: "v1"
+    spec:
+      securityContext:
+        # The upstream image declares no USER, so it runs as root. The
+        # upstream manifest forced runAsUser: 1000, which makes nginx
+        # crashloop: the image's /etc/nginx/nginx.conf has `user nginx;`
+        # (nginx starts as root and drops privileges to uid 101) and it
+        # chowns /var/cache/nginx/* at startup. Both require root.
+        # runAsUser / runAsNonRoot are therefore deliberately NOT set.
+        # fsGroup is kept from upstream so the mounted ConfigMap is
+        # group-readable.
+        fsGroup: 2000
+      containers:
+        - name: mario
+          # Digest-pinned. NOTE: the digest named in the upstream task brief
+          # (sha256:44dcd621...) is the image CONFIG digest, not a pullable
+          # manifest reference — `docker pull` rejects it with
+          # "manifest unknown". This is the Docker Hub manifest digest for
+          # sevenajay/mario:latest and it is a single amd64 manifest, which
+          # matches the amd64-only node (prodesk1).
+          image: sevenajay/mario@sha256:8541a39162f3510821eccb7be96a12ba210e93cefee55e7d3fb159418019116b
+          # Upstream used `latest` + imagePullPolicy: Always, which means a
+          # node restart can silently pull a different image and change the
+          # running code. The digest above + IfNotPresent makes the pod
+          # reproducible.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: NODE_ENV
+              value: "production"
+          # Upstream probes GET "/" on the http port. That path serves the
+          # game's index.html with 200, so it is a valid liveness signal.
+          # The image ships no wget and no curl — these probes are executed
+          # by the kubelet, not inside the container, so that is fine.
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+            successThreshold: 1
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: nginx-metrics
+              # subPath mounts ONE file. Mounting the ConfigMap over the
+              # whole /etc/nginx/conf.d directory would shadow the image's
+              # default.conf and remove the port-80 server block, taking the
+              # game itself offline.
+              mountPath: /etc/nginx/conf.d/metrics.conf
+              subPath: metrics.conf
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+              # Upstream dropped ALL capabilities, which makes nginx fail at
+              # startup:
+              #   [emerg] chown("/var/cache/nginx/client_temp", 101) failed
+              #   (1: Operation not permitted)
+              # and it also cannot bind port 80 without CAP_NET_BIND_SERVICE.
+              # These are the exact capabilities nginx needs to start, and
+              # nothing more. Verified locally against the exact image digest
+              # with the same drop/add set.
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - FOWNER
+                - SETGID
+                - SETUID
+                - NET_BIND_SERVICE
+      volumes:
+        - name: nginx-metrics
+          configMap:
+            name: mario-nginx-metrics
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
