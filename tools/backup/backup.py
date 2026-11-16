@@ -306,6 +306,13 @@ def stage_tar(app: dict, workdir: str) -> str:
 
     excludes = list(app.get("exclude", []))
     verify = app.get("verify", {}) or {}
+    # Redaction config: memberwise JSON key removal at backup time.
+    # When specified, the listed keys are deleted from the target JSON member
+    # before archiving. The app stores these as credentials; keeping them out
+    # of the published artifact lets restored instances generate fresh tokens
+    # on first start (precedent: secret.txt is excluded entirely).
+    redact = app.get("redact", []) or []
+    _redacted_secrets = set()
     arcroot = os.path.basename(source.rstrip("/"))
 
     work = os.path.join(workdir, f"{name}.tar.gz")
@@ -334,7 +341,49 @@ def stage_tar(app: dict, workdir: str) -> str:
                 if os.path.islink(full):
                     log(f"{name}: skipped symlink {rel}")
                     continue
-                tar.add(full, arcname=os.path.join(arcroot, rel))
+
+                # Redact JSON members that contain credentials
+                redacted = False
+                for spec in redact:
+                    if rel == spec["member"]:
+                        try:
+                            with open(full) as fh:
+                                payload = json.load(fh)
+                            # Delete the listed keys at the dotted path
+                            parts = spec["path"].split(".")
+                            cur = payload
+                            ok = True
+                            for p in parts[:-1]:
+                                if isinstance(cur, dict) and p in cur:
+                                    cur = cur[p]
+                                else:
+                                    ok = False
+                                    break
+                            if ok and isinstance(cur, dict) and parts[-1] in cur:
+                                removed = []
+                                for k in spec["keys"]:
+                                    if k in cur:
+                                        removed.append(cur.pop(k))
+                                # Write redacted JSON to a temp file in workdir
+                                tmp_path = os.path.join(
+                                    workdir, f".redacted_{os.path.basename(rel)}"
+                                )
+                                with open(tmp_path, "w") as fh:
+                                    json.dump(payload, fh)
+                                tar.add(tmp_path, arcname=os.path.join(arcroot, rel))
+                                os.remove(tmp_path)
+                                # Remember the original secret values for leak check
+                                for v in removed:
+                                    if isinstance(v, str) and v:
+                                        _redacted_secrets.add(v.encode())
+                            redacted = True
+                            log(f"{name}: redacted {rel} keys={spec['keys']}")
+                            break
+                        except (json.JSONDecodeError, Exception) as e:
+                            log(f"{name}: redaction warning for {rel}: {e}")
+                            break
+                if not redacted:
+                    tar.add(full, arcname=os.path.join(arcroot, rel))
                 added += 1
 
     if added == 0:
@@ -404,6 +453,26 @@ def stage_tar(app: dict, workdir: str) -> str:
                     log(f"verify: {name} matches_live_source {json_key}_count={live_count}")
 
     log(f"verify: {name} archive_ok members={len(members)} bytes={size}")
+
+    # Leak check: ensure redacted secret values do not appear anywhere in
+    # the staged archive. The archive member bytes are scanned for the
+    # original secret values that were removed from url-watches.json.
+    if _redacted_secrets:
+        with tarfile.open(work, "r:gz") as tar:
+            for member in tar.getmembers():
+                if not member.isfile():
+                    continue
+                f = tar.extractfile(member)
+                if f is None:
+                    continue
+                data = f.read()
+                for secret in _redacted_secrets:
+                    if secret in data:
+                        fail(
+                            f"{name}: redacted secret value found in archive "
+                            f"member {member.name}"
+                        )
+
     return work
 
 

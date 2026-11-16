@@ -19,7 +19,18 @@
         "json_key": "watching",
         "min_count": 1,
         "compare_source": true
-      }
+      },
+      "redact": [
+        {
+          "member": "url-watches.json",
+          "path": "settings.application",
+          "keys": [
+            "api_access_token",
+            "rss_access_token"
+          ]
+        }
+      ],
+      "_comment": "Backup-time redaction of API/RSS tokens from url-watches.json; restored app generates fresh tokens on first start (same pattern as secret.txt exclusion). Human authority may opt for SOPS-encrypted Secret injection or written acknowledgement of exposure risk instead."
     }
   ]
 }
