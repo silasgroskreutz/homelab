@@ -1,0 +1,22 @@
+# The chart lives in this repo, so Flux resolves it straight from the existing
+# GitRepository source. No extra HelmRepository and no extra GitRepository.
+#
+# This HelmChart sits in the flux-system namespace because that is where the
+# flux-system GitRepository lives, and this Flux version's HelmChart CRD has
+# no sourceRef.namespace field, so the source must be in the same namespace.
+#
+# reconcileStrategy: ChartVersion means the chart is re-packaged when
+# charts/bookorbit/Chart.yaml version is bumped. Use Revision instead if you
+# want every commit to the chart to roll out.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmChart
+metadata:
+  name: bookorbit
+  namespace: flux-system
+spec:
+  interval: 5m
+  chart: ./charts/bookorbit
+  reconcileStrategy: ChartVersion
+  sourceRef:
+    kind: GitRepository
+    name: flux-system

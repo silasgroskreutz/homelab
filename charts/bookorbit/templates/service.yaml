@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bookorbit.fullname" . }}
+  labels:
+    {{- include "bookorbit.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.app.port }}
+      targetPort: {{ .Values.app.port }}
+      name: http
+  selector:
+    {{- include "bookorbit.selectorLabels" . | nindent 4 }}

@@ -1,0 +1,115 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bookorbit.postgresFullname" . }}
+  labels:
+    {{- include "bookorbit.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.postgres.port }}
+      targetPort: {{ .Values.postgres.port }}
+      name: postgres
+  selector:
+    {{- include "bookorbit.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "bookorbit.postgresFullname" . }}
+  labels:
+    {{- include "bookorbit.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "bookorbit.postgresFullname" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "bookorbit.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        {{- include "bookorbit.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: postgres
+    spec:
+      securityContext:
+        # fsGroup makes the PVC group-writable for the postgres user (999).
+        #
+        # Do NOT pin runAsUser here. The official postgres image starts as root,
+        # chowns PGDATA, then drops to the postgres user with gosu. Forcing
+        # runAsUser skips that chown path and initdb then refuses the
+        # root-owned fresh volume ("data directory has invalid permissions").
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        - name: rundir
+          emptyDir: {}
+      containers:
+        - name: postgres
+          image: {{ .Values.postgres.image }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: {{ .Values.postgres.port }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              # The image needs CHOWN (chown PGDATA), SETUID/SETGID (the gosu
+              # drop to the postgres user) and DAC_OVERRIDE to initialise a
+              # fresh volume. Dropping everything breaks the image's own
+              # privilege drop.
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - DAC_OVERRIDE
+                - FOWNER
+                - SETGID
+                - SETUID
+          env:
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.user | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.database | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.secretName }}
+                  key: POSTGRES_PASSWORD
+            # The pg18 image defaults PGDATA to a subdirectory. Upstream compose
+            # pins it explicitly; keep it or the volume layout changes.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: rundir
+              mountPath: /var/run/postgresql
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U {{ .Values.postgres.user }} -d {{ .Values.postgres.database }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U {{ .Values.postgres.user }} -d {{ .Values.postgres.database }}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage }}

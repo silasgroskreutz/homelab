@@ -1,0 +1,116 @@
+# Default values for bookorbit.
+# Every value here is non-sensitive. Credentials come from a SOPS-encrypted
+# Secret named by app.secretName, which Flux decrypts before applying.
+
+# Resource names. Upstream compose calls the services "app", "postgres" and
+# "read-aloud-worker"; here the release is the chart, so postgres gets the
+# "-postgres" suffix and the app keeps the bare name.
+fullnameOverride: bookorbit
+
+image:
+  repository: ghcr.io/bookorbit/bookorbit
+  tag: latest
+  # Pinned to the multi-arch index digest of the upstream `latest` tag at the
+  # time of writing. Upstream publishes amd64 and arm64 under the same index,
+  # so the node architecture does not matter. When a digest is set it wins over
+  # the tag, and Renovate can bump it.
+  digest: "sha256:d318f7732f6f6330312e2c5f854f7899f858b54cc4b18a13cde1f43b5bea0515"
+  pullPolicy: IfNotPresent
+
+app:
+  port: 3000
+  # Public URL. Cloudflare terminates TLS on the tunnel edge, so the app only
+  # ever sees plain HTTP from the cloudflared connector.
+  appUrl: https://bookorbit.silasgroskreutz.com
+  clientUrl: https://bookorbit.silasgroskreutz.com
+  timezone: America/Chicago
+  # The app image starts as root only to chown its data dir, then drops to
+  # PUID:PGID via su-exec. Running the container as PUID:PGID directly is
+  # equivalent here because the data PVC carries fsGroup=PUID.
+  puid: 1000
+  pgid: 1000
+  # Upstream compose sets NODE_MAX_OLD_SPACE_SIZE=auto, which derives the heap
+  # from the cgroup limit. We pin it instead so the heap cannot drift with the
+  # memory limit.
+  nodeMaxOldSpaceSize: "1536"
+  # Library root the web UI may browse.
+  libraryBrowseRoot: /books
+  secretName: bookorbit-secret
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+postgres:
+  image: pgvector/pgvector:pg18
+  # pgvector/pgvector is required, not vanilla postgres: upstream BookOrbit
+  # uses the vector extension for semantic search over the library.
+  user: bookorbit
+  database: bookorbit
+  port: 5432
+  secretName: bookorbit-secret
+  storage: 10Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+persistence:
+  # App data (covers, book-bucket, read-aloud jobs, migration lock). local-path
+  # PVC on Prodesk.
+  data:
+    size: 10Gi
+  # The book library lives on the NAS (//192.168.0.2/public/Books).
+  #
+  # Prodesk mounts that share twice:
+  #   /mnt/nas/books   - uid=0 (root), NOT writable by the app's uid
+  #   /mnt/nas-roms    - uid=1000, forceuid  -> /mnt/nas-roms/Books
+  #
+  # The two paths are byte-identical (verified by md5); only the second mount
+  # presents the files as uid 1000. So the app reads the library from
+  # /mnt/nas-roms/Books and can write to it.
+  books:
+    hostPath: /mnt/nas-roms/Books
+    readOnly: false
+
+# External exposure is handled by a Cloudflare Tunnel, not by Traefik.
+#
+# The tunnel's published-application rule sends bookorbit.silasgroskreutz.com
+# to http://bookorbit:3000 over the cluster network, and Cloudflare's edge
+# terminates TLS. That keeps the ingress path free of a cert-manager
+# dependency, which the rest of the cluster does not currently have.
+ingress:
+  enabled: false
+  className: traefik
+  host: bookorbit.silasgroskreutz.com
+  tls:
+    enabled: false
+    secretName: bookorbit-tls
+    clusterIssuer: letsencrypt-prod
+
+# Cloudflare Tunnel connector. The tunnel credentials are a SOPS-encrypted
+# Secret (tunnel-credentials) with the standard credentials.json payload.
+cloudflare:
+  enabled: true
+  tunnel: bookorbit
+  # Locally-managed tunnel: cloudflared reads credentials.json from the
+  # SOPS-encrypted Secret and the ingress rules from the ConfigMap below.
+  # The public DNS record already points at this tunnel.
+  hostname: bookorbit.silasgroskreutz.com
+  service: http://bookorbit:3000
+  credentialsSecretName: tunnel-credentials
+  replicas: 2
+  image: cloudflare/cloudflared:latest
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi

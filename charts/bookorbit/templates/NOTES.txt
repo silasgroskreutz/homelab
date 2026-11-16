@@ -1,0 +1,7 @@
+BookOrbit is installed.
+
+  URL:            {{ .Values.app.appUrl }}
+  Setup token:    kubectl -n {{ .Release.Namespace }} get secret {{ .Values.app.secretName }} -o jsonpath='{.data.SETUP_BOOTSTRAP_TOKEN}' | base64 -d
+  Library mount:  {{ .Values.persistence.books.hostPath }}
+  App data PVC:   {{ include "bookorbit.fullname" . }}-data
+  Postgres PVC:   {{ include "bookorbit.postgresFullname" . }}-data
