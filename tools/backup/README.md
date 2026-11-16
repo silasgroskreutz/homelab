@@ -40,6 +40,29 @@ The script needs only `tar`, `python3` and `sha256sum`. It does **not**
 need a running changedetection instance, a reachable cluster, or the
 `backup` namespace. It works from a plain shell on the node.
 
+### Getting the script onto the node
+
+The script is self-contained: it does not import anything from the repo,
+and the only repo file it optionally consults is
+`tools/backup/datastore-path.sh` (for the live-path detection), which it
+degrades gracefully without. So any copy of it runs.
+
+```sh
+# from the machine that holds the repo
+scp tools/backup/restore.sh silas@192.168.0.101:/tmp/restore.sh
+ssh silas@192.168.0.101 'chmod +x /tmp/restore.sh'
+```
+
+The node's own `~/homelab` clone is a separate, older checkout that
+cannot pull from GitHub (no SSH key for it on that host), so do not
+assume `git pull` there will bring the script over.
+
+On the node, `kubectl` from `PATH` is a snap build with no working
+kubeconfig; `sudo -n /usr/local/bin/k3s kubectl` is the one that reaches
+the API server. The script tries both, plus a direct glob of the
+local-path provisioner directory, so it detects the live datastore either
+way.
+
 ### The three things that break a restore
 
 These are the non-obvious details. Each of them produces a restore that
