@@ -10,3 +10,4 @@ resources:
   - flux-charts
   - changedetection
   - mario
+  - backup

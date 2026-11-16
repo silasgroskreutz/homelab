@@ -40,9 +40,30 @@ Config file (JSON):
     {"name": "komga", "kind": "tar", "source": "/config"}
   ]
 }
+
+5. The backup root is a SHARED tree. `dest` may point at a directory that
+   also holds artifacts of other apps, so `prune()` only ever touches the
+   per-app directories this configuration is responsible for. It must never
+   walk the whole destination and delete what it does not own.
+
+The "tar" kind (used for apps whose state is plain files rather than a
+database) supports two extra keys:
+
+  "exclude":       glob patterns, relative to the source root, that must not
+                   enter the archive. changedetection.io keeps "secret.txt"
+                   (the Flask session key) next to its datastore; that is a
+                   credential and must not travel to a backup target.
+  "verify":        checks applied to the STAGED archive, before it is copied:
+                     "members":     paths that must be present in the archive
+                     "json_member": archive member to parse as JSON
+                     "json_key":    key in that JSON holding the record map
+                     "min_count":   minimum number of records (default 1)
+                     "compare_source": also count the live source and log
+                     whether the two agree
 """
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -253,18 +274,136 @@ def stage_navidrome(app: dict, workdir: str) -> str:
     return os.path.join(workdir, f"{name}.db")
 
 
+def _excluded(relpath: str, patterns: list) -> bool:
+    """True when a source-relative path matches one of the exclude globs."""
+    for pattern in patterns:
+        if fnmatch.fnmatch(relpath, pattern) or fnmatch.fnmatch(
+            os.path.basename(relpath), pattern
+        ):
+            return True
+    return False
+
+
 def stage_tar(app: dict, workdir: str) -> str:
-    """Archive a directory of app state (no SQLite semantics required)."""
+    """Archive a directory of app state (no SQLite semantics required).
+
+    The archive is built member by member rather than with a single tar.add()
+    of the tree, so that excluded paths can be skipped. `exclude` patterns are
+    matched against the path relative to the source root and against the bare
+    filename, so "secret.txt" and "*.tmp" both do what they look like.
+
+    The result is verified LOCALLY before it is published: the archive must
+    reopen, contain the required members, and any declared JSON member must
+    parse and hold a non-zero number of records. A backup of an empty
+    datastore is a successful run of a useless backup, so that is a failure.
+    """
     name = app["name"]
     source = app["source"]
     if not os.path.exists(source):
         fail(f"{name}: source path {source} does not exist")
+    if not os.path.isdir(source):
+        fail(f"{name}: source path {source} is not a directory")
+
+    excludes = list(app.get("exclude", []))
+    verify = app.get("verify", {}) or {}
+    arcroot = os.path.basename(source.rstrip("/"))
+
     work = os.path.join(workdir, f"{name}.tar.gz")
+    if os.path.exists(work):
+        os.remove(work)
+
+    added = 0
     with tarfile.open(work, "w:gz") as tar:
-        tar.add(source, arcname=os.path.basename(source))
+        for dirpath, dirnames, filenames in os.walk(source):
+            dirnames.sort()
+            rel_dir = os.path.relpath(dirpath, source)
+            if rel_dir == ".":
+                rel_dir = ""
+            # Prune excluded directories in place so os.walk never descends
+            # into them.
+            dirnames[:] = [
+                d for d in dirnames
+                if not _excluded(os.path.join(rel_dir, d) if rel_dir else d, excludes)
+            ]
+            for filename in sorted(filenames):
+                rel = os.path.join(rel_dir, filename) if rel_dir else filename
+                if _excluded(rel, excludes):
+                    log(f"{name}: excluded {rel}")
+                    continue
+                full = os.path.join(dirpath, filename)
+                if os.path.islink(full):
+                    log(f"{name}: skipped symlink {rel}")
+                    continue
+                tar.add(full, arcname=os.path.join(arcroot, rel))
+                added += 1
+
+    if added == 0:
+        fail(f"{name}: archive would contain no files")
+
     size = os.path.getsize(work)
     if size == 0:
         fail(f"{name}: archive is 0 bytes")
+
+    # Verify the STAGED archive locally. Nothing reaches the share until
+    # these checks pass. "members" and "json_member" are given relative to
+    # the source root; the archive stores them under the source's basename.
+    members = set()
+    with tarfile.open(work, "r:gz") as tar:
+        for member in tar.getmembers():
+            members.add(member.name)
+        for required in verify.get("members", []):
+            if os.path.join(arcroot, required) not in members:
+                fail(
+                    f"{name}: staged archive is missing required member "
+                    f"{required!r} (has {sorted(members)})"
+                )
+
+        json_member = verify.get("json_member")
+        if json_member:
+            member_name = os.path.join(arcroot, json_member)
+            if member_name not in members:
+                fail(f"{name}: staged archive is missing {json_member!r}")
+            extracted = tar.extractfile(member_name)
+            if extracted is None:
+                fail(f"{name}: could not read {json_member!r} from the archive")
+            try:
+                payload = json.loads(extracted.read().decode("utf-8"))
+            except (ValueError, UnicodeDecodeError) as exc:
+                fail(f"{name}: {json_member!r} in the archive is not valid JSON: {exc}")
+
+            json_key = verify.get("json_key")
+            if json_key:
+                records = payload.get(json_key)
+                if not isinstance(records, dict):
+                    fail(
+                        f"{name}: {json_member!r} has no {json_key!r} object "
+                        f"(keys: {sorted(payload)})"
+                    )
+                count = len(records)
+                minimum = int(verify.get("min_count", 1))
+                if count < minimum:
+                    fail(
+                        f"{name}: {json_member!r} holds {count} {json_key!r} "
+                        f"records, expected at least {minimum}"
+                    )
+                log(f"verify: {name} {json_key}_count={count} (min {minimum})")
+
+                if verify.get("compare_source"):
+                    live_path = os.path.join(source, json_member)
+                    try:
+                        with open(live_path) as handle:
+                            live_payload = json.load(handle)
+                    except (OSError, ValueError) as exc:
+                        fail(f"{name}: cannot read live source {live_path}: {exc}")
+                    live_count = len(live_payload.get(json_key, {}))
+                    if live_count != count:
+                        fail(
+                            f"{name}: archived {json_key} count {count} does not "
+                            f"match live source count {live_count}"
+                        )
+                    log(f"verify: {name} matches_live_source {json_key}_count={live_count}")
+
+    log(f"verify: {name} archive_ok members={len(members)} bytes={size}")
     return work
 
 
@@ -273,22 +412,43 @@ def publish(work: str, dest_dir: str, app_name: str, suffix: str) -> str:
 
     A sequential copy is the only write mode that behaves on this share, so
     the file is copied rather than moved.
+
+    The COPY is verified, not just the staged file: the artifact is read
+    back from the share and its digest compared with the staged one. A
+    backup that was never read back is an assumption.
     """
     size = os.path.getsize(work)
+    staged_sha = sha256(work)
     target = os.path.join(dest_dir, f"{app_name}-{stamp()}{suffix}")
+    log(f"{app_name}: staged {work} ({size} bytes, sha256={staged_sha[:16]})")
+
     shutil.copyfile(work, target)
+
     copied = os.path.getsize(target)
     if copied != size:
         fail(f"{app_name}: copy to share truncated ({copied} of {size} bytes)")
-    log(f"{app_name}: staged {size} bytes -> {target} ({copied} bytes on share)")
+    copied_sha = sha256(target)
+    if copied_sha != staged_sha:
+        fail(
+            f"{app_name}: copy to share is corrupt "
+            f"(sha256 {copied_sha[:16]} != staged {staged_sha[:16]})"
+        )
+    log(f"{app_name}: published {target} ({copied} bytes on share)")
+    log(f"{app_name}: copied: verified sha256={copied_sha[:16]} matches staged")
     return target
 
 
-def prune(dest_root: str, keep: int) -> None:
-    """Keep the newest `keep` artifacts in each per-app subdirectory."""
-    if keep <= 0:
-        return
-    for app in sorted(os.listdir(dest_root)):
+def prune(dest_root: str, managed: dict) -> None:
+    """Keep the newest artifacts in the per-app directories this run owns.
+
+    Only the directories named in `managed` are touched. The backup root is
+    a shared NAS directory that also holds other apps' backups and unrelated
+    content, so a walk over everything under it would prune data this job
+    does not own. `managed` maps app name to its retention count.
+    """
+    for app, keep in sorted(managed.items()):
+        if keep <= 0:
+            continue
         app_dir = os.path.join(dest_root, app)
         if not os.path.isdir(app_dir):
             continue
@@ -342,7 +502,13 @@ def main() -> None:
             fail(f"{name}: unknown kind {kind!r}")
         results.append(publish(work, dest_dir, name, suffix))
 
-    prune(dest_root, keep)
+    # Retention applies ONLY to the apps this configuration manages. The
+    # backup root may be shared with other apps' backups, so pruning is
+    # scoped rather than a walk over the whole destination.
+    managed = {
+        app["name"]: int(app.get("keep", keep)) for app in config["apps"]
+    }
+    prune(dest_root, managed)
 
     log(f"done: {len(results)} artifact(s) written under {dest_root}")
     for path in results:

@@ -1,0 +1,25 @@
+{
+  "dest": "/backups/Backups",
+  "keep": 14,
+  "apps": [
+    {
+      "name": "changedetection",
+      "kind": "tar",
+      "source": "/datastore",
+      "keep": 2,
+      "exclude": [
+        "secret.txt",
+        "url-watches-before-*.json"
+      ],
+      "verify": {
+        "members": [
+          "url-watches.json"
+        ],
+        "json_member": "url-watches.json",
+        "json_key": "watching",
+        "min_count": 1,
+        "compare_source": true
+      }
+    }
+  ]
+}

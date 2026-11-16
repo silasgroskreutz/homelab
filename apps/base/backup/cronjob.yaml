@@ -1,0 +1,109 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: changedetection-backup
+spec:
+  # 04:23 every day, deliberately not on the hour and deliberately not
+  # 03:00. "0 3 * * *" is the busiest minute of the day for every cron
+  # scheduler on the planet: the whole fleet of cron jobs on the internet
+  # wakes up at exactly 03:00:00, so the NAS, the network and the upstream
+  # registries all see the same spike. An odd minute off the hour also
+  # avoids the on-the-hour spikes of every other scheduled task on this
+  # host. 04:23 local is quiet for both the CIFS share and the
+  # changedetection pod.
+  schedule: "23 4 * * *"
+  # The node runs America/Chicago. Naming the zone explicitly keeps the
+  # schedule stable if the node's timezone is ever changed, and keeps
+  # DST from silently shifting the run by an hour twice a year.
+  timeZone: "America/Chicago"
+  # A backup must never overlap the next one. Forbid means the new run is
+  # skipped, not queued, so a slow backup can never stack up behind
+  # itself and hammer the CIFS share.
+  concurrencyPolicy: Forbid
+  # Unbounded job history accumulates on the node.
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      # A backup that hangs forever must not occupy a slot forever. 1 hour
+      # is far above the real runtime (seconds) and far below the 24 hour
+      # gap between runs, so a stuck run is killed well before the next
+      # one is due.
+      activeDeadlineSeconds: 3600
+      # Clean up finished pods so they do not pile up on the node.
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            # The CIFS share /mnt/nas-roms is mounted
+            # uid=1000,forceuid,gid=0,noforcegid,file_mode=0755,dir_mode=0755.
+            # Any other UID cannot create files there, and root would
+            # create files that UID 1000 can neither overwrite nor
+            # delete. UID 1000 / GID 0 is therefore mandatory, not a
+            # preference.
+            runAsUser: 1000
+            runAsGroup: 0
+            fsGroup: 1000
+          containers:
+            - name: backup
+              image: 192.168.0.101:5000/homelab-backup@sha256:42b1e01087ed854d6130646b6765b668704ebc07e8ac9fd876cbbdc9d5d2e4e8
+              imagePullPolicy: IfNotPresent
+              command: ["python3", "/scripts/backup.py", "--config", "/scripts/config.json"]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              volumeMounts:
+                - name: nas
+                  # The CIFS share is a NODE-level mount, not a PVC. It
+                  # exists on the node host as //192.168.0.2/public ->
+                  # /mnt/nas-roms, so a hostPath is the only way in.
+                  # The cluster is single-node, so this hostPath always
+                  # resolves to the same filesystem.
+                  mountPath: /backups
+                - name: datastore
+                  # Read-only: the backup must never write to the app's
+                  # live data.
+                  mountPath: /datastore
+                  readOnly: true
+                - name: scripts
+                  # The engine (backup.py) and its config (config.json)
+                  # come from Git via this ConfigMap, not from the image.
+                  # Mounting the ConfigMap at /scripts provides
+                  # /scripts/backup.py and /scripts/config.json.
+                  mountPath: /scripts
+                  readOnly: true
+          volumes:
+            - name: nas
+              hostPath:
+                path: /mnt/nas-roms
+                type: Directory
+            - name: datastore
+              # The changedetection datastore PVC lives in the
+              # `changedetection` namespace, and a PVC can only be
+              # mounted by a pod in the SAME namespace as the claim. This
+              # CronJob lives in the dedicated `backup` namespace, so the
+              # PVC cannot be mounted directly.
+              #
+              # The cluster is a single-node k3s cluster and this PVC is
+              # provisioned by the local-path provisioner, which keeps
+              # the volume in a directory on the node. That directory is
+              # mounted here read-only instead. The path embeds the PVC's
+              # UID, so it changes if the PVC is ever recreated; the
+              # engine then fails loudly on the missing datastore instead
+              # of silently archiving an empty directory.
+              #
+              # Current value:
+              #   ./tools/backup/datastore-path.sh
+              hostPath:
+                path: /var/lib/rancher/k3s/storage/pvc-a1c470dd-1194-4ff4-9e17-4b12933f53ff_changedetection_changedetection-data-pvc
+                type: Directory
+            - name: scripts
+              configMap:
+                name: backup-scripts
+                defaultMode: 0444
