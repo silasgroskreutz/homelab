@@ -232,15 +232,15 @@ spec:
               mountPath: /etc/cloudflared/creds
               readOnly: true
       volumes:
-        - creds:
-            secret:
-              secretName: tunnel-credentials
-        - config:
-            configMap:
-              name: cloudflared
-              items:
-                - key: config.yaml
-                  path: config.yaml
+        - name: creds
+          secret:
+            secretName: tunnel-credentials
+        - name: config
+          configMap:
+            name: cloudflared
+            items:
+              - key: config.yaml
+                path: config.yaml
 ---
 apiVersion: v1
 kind: ConfigMap
