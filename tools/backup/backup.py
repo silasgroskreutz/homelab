@@ -918,28 +918,39 @@ def publish(work: str, dest_dir: str, app_name: str, suffix: str) -> tuple:
     size = os.path.getsize(work)
     staged_sha = sha256(work)
     target = os.path.join(dest_dir, f"{app_name}-{stamp()}{suffix}")
+    # The copy lands under a temporary name and is renamed into place only
+    # after it has been read back and verified. A pod killed mid-copy (the
+    # CronJob's activeDeadlineSeconds does exactly that when the share
+    # stalls) then leaves a file that is clearly marked incomplete, not a
+    # file wearing a valid artifact's name that the next run's retention
+    # would count as a good backup.
+    partial = f"{target}.partial"
     log(f"{app_name}: staged {work} ({size} bytes, sha256={staged_sha[:16]})")
 
     try:
-        shutil.copyfile(work, target)
+        shutil.copyfile(work, partial)
     except OSError as exc:
         # The copy itself died (I/O error, the mount going away). The
-        # half-written file must not stay behind under the artifact's
-        # name.
-        _discard_partial(target)
+        # half-written file must not stay behind.
+        _discard_partial(partial)
         fail(f"{app_name}: copy to share failed: {exc}")
 
-    copied = os.path.getsize(target)
+    copied = os.path.getsize(partial)
     if copied != size:
-        _discard_partial(target)
+        _discard_partial(partial)
         fail(f"{app_name}: copy to share truncated ({copied} of {size} bytes)")
-    copied_sha = sha256(target)
+    copied_sha = sha256(partial)
     if copied_sha != staged_sha:
-        _discard_partial(target)
+        _discard_partial(partial)
         fail(
             f"{app_name}: copy to share is corrupt "
             f"(sha256 {copied_sha[:16]} != staged {staged_sha[:16]})"
         )
+    try:
+        os.replace(partial, target)
+    except OSError as exc:
+        _discard_partial(partial)
+        fail(f"{app_name}: could not publish the verified copy: {exc}")
     log(f"{app_name}: published {target} ({copied} bytes on share)")
     log(f"{app_name}: copied: verified sha256={copied_sha[:16]} matches staged")
     return target, copied_sha, copied
@@ -965,7 +976,7 @@ def _discard_partial(target: str) -> None:
         log(f"could not remove the partial artifact {target}: {exc}")
 
 
-def prune(dest_root: str, managed: dict) -> None:
+def prune(dest_root: str, managed: dict, since: str | None = None) -> None:
     """Keep the newest artifacts in the per-app directories this run owns.
 
     Two scopes, both deliberate:
@@ -1013,6 +1024,36 @@ def prune(dest_root: str, managed: dict) -> None:
             except OSError as exc:
                 log(f"prune: could not remove {app}/{os.path.basename(stale)}: {exc}")
 
+        # Abandoned partial copies. publish() writes to "<name>.partial"
+        # and renames it into place only after it has been read back and
+        # verified, so a partial file is by definition an incomplete
+        # artifact. A partial is only removed when it is certainly
+        # abandoned: it predates both the current run (so no live copy is
+        # writing it) and the newest complete artifact in the directory.
+        # A partial that a concurrent job is still writing is left alone.
+        newest = owned[0][0] if owned else None
+        for name in sorted(os.listdir(app_dir)):
+            if not name.endswith(".partial"):
+                continue
+            full = os.path.join(app_dir, name)
+            if not os.path.isfile(full):
+                continue
+            stamp_match = re.match(
+                rf"^{re.escape(app)}-(\d{{8}}T\d{{6}}Z){re.escape(suffix)}\.partial$", name
+            )
+            if not stamp_match:
+                continue
+            part_stamp = stamp_match.group(1)
+            if since is not None and part_stamp >= since:
+                continue
+            if newest is not None and part_stamp >= newest:
+                continue
+            try:
+                os.remove(full)
+                log(f"prune: removed the abandoned partial {app}/{name}")
+            except OSError as exc:
+                log(f"prune: could not remove {app}/{name}: {exc}")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -1049,6 +1090,9 @@ def main() -> None:
         log(f"selected apps: {', '.join(app['name'] for app in apps)}")
 
     os.makedirs(workdir, exist_ok=True)
+    # The run's start stamp: a partial copy on the share that predates it
+    # belongs to a run that died, not to one that is still writing.
+    run_started = stamp()
     ensure_dir(dest_root)
 
     results: list[tuple] = []
@@ -1086,7 +1130,7 @@ def main() -> None:
         }
         for app in apps
     }
-    prune(dest_root, managed)
+    prune(dest_root, managed, since=run_started)
 
     log(f"done: {len(results)} artifact(s) written under {dest_root}")
     for path, digest, size in results:

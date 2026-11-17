@@ -46,6 +46,16 @@ and inside those directories only deletes files this engine produced
 (`<app>-<UTC stamp><suffix>`). A vendor's own backup or a manual dump in
 the same directory is kept and logged as kept.
 
+A copy is written to `<app>-<stamp><suffix>.partial` and renamed into
+place only after it has been read back from the share and its digest
+matched the staged file. A job killed mid-copy (the CronJob's
+`activeDeadlineSeconds` does exactly that when the share stalls) then
+leaves a clearly marked incomplete file instead of a file wearing a valid
+artifact's name that the next run's retention would count as a good
+backup. `prune()` removes abandoned partials — ones that predate both
+the current run and the newest complete artifact in that directory — and
+leaves a partial alone when a concurrent job may still be writing it.
+
 ### Where each app's data actually lives
 
 | App | Live location | Backup reads |
