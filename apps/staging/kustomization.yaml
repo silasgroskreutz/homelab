@@ -13,3 +13,4 @@ resources:
   - backup
   - cert-manager
   - hermes-dashboard
+  - kitchenowl-test

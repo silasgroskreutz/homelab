@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kitchenowl-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kitchenowl-test
+  template:
+    metadata:
+      labels:
+        app: kitchenowl-test
+    spec:
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        # The all-in-one image: Flutter web frontend + Flask backend + uWSGI
+        # on a single port 8080. Verified on Prodesk that /, /api/* and the
+        # socket.io websocket upgrade all work through this one container.
+        - name: kitchenowl-test
+          image: tombursch/kitchenowl:v0.8.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            # Must match the public URL exactly (including scheme) or the
+            # socket.io origin check rejects the browser client.
+            - name: FRONT_URL
+              value: "https://kitchenowl-test.silasgroskreutz.com"
+            # The upstream default is PLEASE_CHANGE_ME. Never run that.
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kitchenowl-test
+                  key: JWT_SECRET_KEY
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /api/health/8M4F88S8ooi4sMbLBfkkV7ctWwgibW6V
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health/8M4F88S8ooi4sMbLBfkkV7ctWwgibW6V
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: kitchenowl-test-data-pvc

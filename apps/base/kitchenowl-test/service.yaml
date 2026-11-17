@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kitchenowl-test
+spec:
+  ports:
+    # The all-in-one image serves the Flutter web frontend, the JSON API and
+    # the socket.io websocket from a single uWSGI port.
+    - port: 80
+      targetPort: 8080
+      name: http
+  selector:
+    app: kitchenowl-test
+  type: ClusterIP
