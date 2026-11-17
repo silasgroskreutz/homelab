@@ -928,13 +928,22 @@ data:
         target = os.path.join(dest_dir, f"{app_name}-{stamp()}{suffix}")
         log(f"{app_name}: staged {work} ({size} bytes, sha256={staged_sha[:16]})")
 
-        shutil.copyfile(work, target)
+        try:
+            shutil.copyfile(work, target)
+        except OSError as exc:
+            # The copy itself died (I/O error, the mount going away). The
+            # half-written file must not stay behind under the artifact's
+            # name.
+            _discard_partial(target)
+            fail(f"{app_name}: copy to share failed: {exc}")
 
         copied = os.path.getsize(target)
         if copied != size:
+            _discard_partial(target)
             fail(f"{app_name}: copy to share truncated ({copied} of {size} bytes)")
         copied_sha = sha256(target)
         if copied_sha != staged_sha:
+            _discard_partial(target)
             fail(
                 f"{app_name}: copy to share is corrupt "
                 f"(sha256 {copied_sha[:16]} != staged {staged_sha[:16]})"
@@ -942,6 +951,26 @@ data:
         log(f"{app_name}: published {target} ({copied} bytes on share)")
         log(f"{app_name}: copied: verified sha256={copied_sha[:16]} matches staged")
         return target, copied_sha, copied
+
+
+    def _discard_partial(target: str) -> None:
+        """Remove a half-written artifact from the share.
+
+        A copy that dies halfway leaves a file with the right NAME on the
+        share. It looks like a valid artifact to anyone reading the directory,
+        and the next run's retention counts it as one of this engine's own
+        artifacts. Measured on this cluster: the NAS link degraded to
+        multi-second round trips mid-copy (the node reaches the share over
+        Wi-Fi only, with the wired interface down), which is exactly the kind
+        of failure that produces a truncated file.
+
+        Removing it is safe because a partial copy is never a valid artifact.
+        """
+        try:
+            os.remove(target)
+            log(f"removed the partial artifact {target}")
+        except OSError as exc:
+            log(f"could not remove the partial artifact {target}: {exc}")
 
 
     def prune(dest_root: str, managed: dict) -> None:
