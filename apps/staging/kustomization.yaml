@@ -12,3 +12,4 @@ resources:
   - mario
   - backup
   - cert-manager
+  - hermes-dashboard

@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: hermes-dashboard
+  namespace: hermes-dashboard
+  labels:
+    app.kubernetes.io/name: hermes-dashboard
+spec:
+  # The Hermes dashboard does NOT run in this cluster. It runs on the
+  # Mac Mini (Virgil, 192.168.0.105) as a launchd-managed process, because
+  # it needs the Hermes agent install, the Kanban board DB, the profile
+  # configs and the local credentials that live on that host.
+  #
+  # So this Service has NO selector and NO pods behind it. Instead the
+  # EndpointSlice below points at the Mac Mini. Traefik resolves the
+  # Service to that EndpointSlice and proxies straight to Virgil.
+  #
+  # Consequence: the dashboard is still reachable only from the LAN
+  # (192.168.0.105 is a private address), and the TLS cert is issued by
+  # cert-manager for the public hostname.
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: http
+      port: 9119
+      targetPort: 9119
+      protocol: TCP
+  selector: {}
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: hermes-dashboard
+  namespace: hermes-dashboard
+  labels:
+    kubernetes.io/service-name: hermes-dashboard
+addressType: IPv4
+ports:
+  - name: http
+    port: 9119
+    protocol: TCP
+endpoints:
+  - addresses:
+      # The Mac Mini (Virgil) — where the Hermes dashboard listens.
+      - 192.168.0.105
+    conditions:
+      ready: true

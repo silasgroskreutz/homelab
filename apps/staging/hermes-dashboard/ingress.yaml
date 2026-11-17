@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hermes-dashboard
+  namespace: hermes-dashboard
+  annotations:
+    # cert-manager solves DNS-01 for this hostname using the Cloudflare
+    # token in the cert-manager namespace. The DNS record
+    # hermes.silasgroskreutz.com -> 192.168.0.101 must exist for the
+    # challenge to be solvable; it does (added 2026-11-16).
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: hermes.silasgroskreutz.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hermes-dashboard
+                port:
+                  number: 9119
+  tls:
+    - hosts:
+        - hermes.silasgroskreutz.com
+      secretName: hermes-dashboard-tls
