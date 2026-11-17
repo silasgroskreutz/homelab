@@ -21,7 +21,19 @@ spec:
         # on a single port 8080. Verified on Prodesk that /, /api/* and the
         # socket.io websocket upgrade all work through this one container.
         - name: kitchenowl-test
-          image: tombursch/kitchenowl:v0.8.1
+          # Patched build of tombursch/kitchenowl:v0.8.1.
+          #
+          # Upstream emits `autocomplete="newUsername"` on the onboarding
+          # username field. "newUsername" is not a valid HTML autocomplete
+          # token, so Chromium/Brave discard it and fall back to heuristic
+          # autofill detection on that field. Brave's heuristic path can pop
+          # an address-autofill suggestion mid-typing, and that popup
+          # crashes the whole browser process (EXC_BREAKPOINT / SIGTRAP):
+          #   brave/brave-browser#60052
+          #   brave/brave-browser#59759
+          # The bundle is patched at build time to emit the valid
+          # `username` token instead. See tools/kitchenowl-patch/.
+          image: 192.168.0.101:5000/kitchenowl-test@sha256:83e644ce3e933c9983e41ee27e3b003373e46ccd412a63663c2697acd7f53a5b
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
