@@ -33,7 +33,20 @@ spec:
           #   brave/brave-browser#59759
           # The bundle is patched at build time to emit the valid
           # `username` token instead. See tools/kitchenowl-patch/.
-          image: 192.168.0.101:5000/kitchenowl-test@sha256:83e644ce3e933c9983e41ee27e3b003373e46ccd412a63663c2697acd7f53a5b
+          #
+          # This image (patched2) ALSO fixes DELIVERY of that fix:
+          #  - the bundle is published under a content-hashed name
+          #    (main.dart.<sha256[:12]>.js) and the Flutter loader's build
+          #    config points at it, so a new build always yields a new URL;
+          #  - index.html references the loader with a build-scoped query
+          #    string, versioning the whole index -> loader -> bundle chain;
+          #  - the origin now sends a real Cache-Control policy (upstream
+          #    main's uwsgi rules), so Cloudflare no longer imposes its
+          #    default 4-hour max-age on the frontend and the legacy
+          #    unhashed main.dart.js is served no-cache.
+          # Without this, clients kept the pre-fix bundle for hours after
+          # the token fix was deployed.
+          image: 192.168.0.101:5000/kitchenowl-test@sha256:578d323703a51a2ea8311ea9138aef3a4d6ebd4f253e303ed90a6107010670ee
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
