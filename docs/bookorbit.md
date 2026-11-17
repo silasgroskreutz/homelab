@@ -121,16 +121,39 @@ outside the repo in `~/.bookorbit-credentials` (mode 600).
 
 The library is the NAS share `//192.168.0.2/public/Books`, 257 files.
 
-Prodesk mounts that share at two paths:
+Prodesk mounts the NAS at four paths:
 
 | Path | Mount | uid | Writable by the app |
 |---|---|---|---|
+| `/mnt/nas-books` | `//192.168.0.2/public/Books` | 0 | no |
 | `/mnt/nas/books` | `//192.168.0.2/public/Books` | 0 | no |
-| `/mnt/nas-roms/Books` | `//192.168.0.2/public/roms` | 1000 | yes |
+| `/mnt/nas-roms` | `//192.168.0.2/public` | 1000 | yes |
+| `/mnt/nas/music` | `//192.168.0.2/public/Music` | 0 | no |
 
-The two paths hold byte-identical content (verified by md5 over the file
-names and sizes), but only the second presents the files as uid 1000, which is
-the uid the app container runs as. So the chart mounts `/mnt/nas-roms/Books`
-at `/books` in the container.
+`/mnt/nas-roms` is the **entire** `public` share, not `public/roms`. It has to
+be: the chart mounts `/mnt/nas-roms/Books` at `/books`, and the backup CronJobs
+write to `/mnt/nas-roms/Backups`. Only the `/mnt/nas-roms` mount presents files
+as uid 1000, which is the uid the app container runs as, so that is the one the
+chart uses.
+
+### Mount table gotcha
+
+`public/roms` contains only the 13 emulator folders (32X, Atari 2600,
+gameboy, ...). `Books`, `Backups`, `Music` and `Movies` are **siblings** of
+`roms`, not children. Mounting `//192.168.0.2/public/roms` at `/mnt/nas-roms`
+makes `/mnt/nas-roms/Books` vanish and the pod fails with
+`hostPath type check failed: /mnt/nas-roms/Books is not a directory`.
+
+### Surviving a reboot
+
+All four CIFS mounts use `_netdev,x-systemd.automount,nofail`. Prodesk boots
+before the NAS answers, so a plain fstab mount races the network and fails
+with `CIFS: VFS: Error connecting to socket. Aborting operation. (rc=-101)`.
+`x-systemd.automount` makes the mount lazy — it attaches on first access,
+after the network settles — and `nofail` keeps boot from blocking on it.
+
+The mount table of the previous boot is recorded in `/home/silas/sweep.log` on
+Prodesk. Check that first when a mount is missing after a reboot; it shows
+what was actually mounted, not what was intended.
 
 `/data` (covers, book-bucket, read-aloud jobs) is a local-path PVC on Prodesk.
