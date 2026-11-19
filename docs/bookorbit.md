@@ -119,7 +119,8 @@ outside the repo in `~/.bookorbit-credentials` (mode 600).
 
 ## Library storage
 
-The library is the NAS share `//192.168.0.2/public/Books`, 257 files.
+The library is the NAS share `//192.168.0.2/public`. Two of its
+subdirectories are mounted into the app: `Books` (ebooks) and `audiobooks`.
 
 Prodesk mounts the NAS at four paths:
 
@@ -131,10 +132,67 @@ Prodesk mounts the NAS at four paths:
 | `/mnt/nas/music` | `//192.168.0.2/public/Music` | 0 | no |
 
 `/mnt/nas-roms` is the **entire** `public` share, not `public/roms`. It has to
-be: the chart mounts `/mnt/nas-roms/Books` at `/books`, and the backup CronJobs
-write to `/mnt/nas-roms/Backups`. Only the `/mnt/nas-roms` mount presents files
-as uid 1000, which is the uid the app container runs as, so that is the one the
-chart uses.
+be: the chart mounts `/mnt/nas-roms/Books` and `/mnt/nas-roms/audiobooks`, and
+the backup CronJobs write to `/mnt/nas-roms/Backups`. Only the `/mnt/nas-roms`
+mount presents files as uid 1000, which is the uid the app container runs as,
+so that is the one the chart uses.
+
+### Two libraries, one browse root
+
+`LIBRARY_BROWSE_ROOT` is a **single** root, and every library folder must sit
+under it — the check is both lexical and canonical (`realpath`), so a folder
+outside it cannot be created however it is spelled.
+
+`Books` and `audiobooks` are **siblings** under `public/`, so their only
+common ancestor is `/`, and the browse root is therefore `/`.
+
+`/books` cannot move instead: 584 books and 5,188 `book_files` rows store
+their absolute path, and `library_folders.path` is what reading progress and
+annotations key off. Relocating it would mean rewriting every stored path for
+no gain.
+
+Widening the browse root does **not** expose the rest of the share. The two
+libraries are mounted as **separate hostPath binds of the two
+subdirectories**, so the container's mount namespace only ever contains
+`/books` and `/audiobooks` — never `/mnt/nas-roms`, and never the share root
+with `Music` and `Backups` in it. What `/` adds is the container's own
+directories: `/app`, `/bin`, `/lib`, `/opt`, `/srv`, `/tmp`, `/usr` and `/var`
+are `SYSTEM_FOLDERS` (hidden from the picker), `/etc`, `/root`, `/proc`,
+`/sys`, `/dev` and `/run` are `BLOCKED_PATHS`, and `/data` is the app's own
+data directory, which the picker marks `appData` and refuses.
+
+Two more things fall out of having two roots:
+
+- **The pod is pinned to `prodesk1`** (`nodeSelector`). The library volumes are
+  hostPath binds of a CIFS mount that only exists there; without the pin a
+  pod landing elsewhere comes up with an empty library.
+- **Watch mode is off; auto-scan uses a cron instead.** inotify does not
+  propagate through CIFS, so a file watcher would never fire.
+
+### Audiobook library settings
+
+Created through `POST /api/v1/libraries` (admin only — the `hermes_ops` API key
+deliberately has no `manage_libraries`):
+
+| Setting | Value | Why |
+|---|---|---|
+| `folders` | `["/audiobooks"]` | |
+| `organizationMode` | `book_per_folder` | one book per directory, multi-track |
+| `allowedFormats` | `m4b, mp3, m4a, opus, ogg, flac` | audio only |
+| `formatPriority` | same list | |
+| `coverAspectRatio` | `1/1` | audiobook covers are square |
+| `watch` | `false` | inotify does not cross CIFS |
+| `autoScanCronExpression` | `0 4 * * *` | daily, 5-field cron |
+| `fileWriteEnabled` | `false` | never rewrite files on the NAS |
+
+`allowedFormats` matters more than it looks. Roughly 19 of the audiobook
+directories also contain an ebook (one has 74 mp3s plus a pdf). A folder
+containing any audio file is grouped into a **single** candidate, so without
+an audio-only format list the pdf/epub can win primary-file selection and
+turn an audiobook into an ebook. Restricting the formats drops the ebook
+companions from the candidates — which also means those 19 pdf / 11 epub /
+3 mobi / 11 txt companions are in **no** library at all. They would need
+their own folder to be catalogued.
 
 ### Mount table gotcha
 

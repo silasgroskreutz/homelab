@@ -35,6 +35,11 @@ spec:
         runAsGroup: {{ .Values.app.pgid }}
         seccompProfile:
           type: RuntimeDefault
+      # The library volumes are hostPath binds of a CIFS mount that only
+      # exists on prodesk1. Without this the pod can land on a node that
+      # has no NAS mount and the library silently comes up empty.
+      nodeSelector:
+        kubernetes.io/hostname: prodesk1
       # Upstream compose gates the app on postgres being healthy and runs
       # migrations before the server starts. The init container reproduces
       # that ordering without a hand-written wait loop in the app.
@@ -121,6 +126,12 @@ spec:
             - name: books
               mountPath: /books
               readOnly: {{ .Values.persistence.books.readOnly }}
+            # The audiobook library: a separate bind of the sibling
+            # audiobooks directory on the same NAS share, so the container
+            # never sees the share root.
+            - name: audiobooks
+              mountPath: /audiobooks
+              readOnly: {{ .Values.persistence.audiobooks.readOnly }}
             - name: tmp
               mountPath: /tmp
           resources:
@@ -147,6 +158,10 @@ spec:
         - name: books
           hostPath:
             path: {{ .Values.persistence.books.hostPath }}
+            type: Directory
+        - name: audiobooks
+          hostPath:
+            path: {{ .Values.persistence.audiobooks.hostPath }}
             type: Directory
         - name: tmp
           emptyDir:

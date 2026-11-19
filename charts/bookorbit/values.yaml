@@ -34,7 +34,28 @@ app:
   # memory limit.
   nodeMaxOldSpaceSize: "1536"
   # Library root the web UI may browse.
-  libraryBrowseRoot: /books
+  #
+  # This is the SINGLE root every library folder must sit under, and the
+  # check is both lexical and canonical (realpath), so a folder outside it
+  # cannot be created no matter how it is spelled.
+  #
+  # It is "/" because the library has two roots on the NAS - Books and
+  # audiobooks - and they are SIBLINGS, so their only common ancestor is
+  # "/". /books cannot move: 584 books and 5,188 book_files rows store
+  # their absolute path, and library_folders.path is what reading progress
+  # and annotations key off, so relocating it would mean rewriting every
+  # stored path.
+  #
+  # Widening the browse root does NOT expose the rest of the NAS share.
+  # The two libraries are mounted as SEPARATE hostPath binds of the two
+  # subdirectories, so the container's mount namespace only ever contains
+  # /books and /audiobooks - never /mnt/nas-roms, and never the share root
+  # with Music and the backup folders in it. What "/" adds is the
+  # container's own directories: /app, /bin, /lib, /opt, /srv, /tmp, /usr
+  # and /var are SYSTEM_FOLDERS (hidden from the picker), /etc, /root,
+  # /proc, /sys, /dev and /run are BLOCKED_PATHS, and /data is the app's
+  # own data directory, which the picker marks as appData and refuses.
+  libraryBrowseRoot: /
   secretName: bookorbit-secret
   # Non-sensitive rotation id. The HelmRelease pulls this from the Secret's
   # ROTATION_ID key so that bumping it in Git rolls the Deployment and the
@@ -81,6 +102,16 @@ persistence:
   # /mnt/nas-roms/Books and can write to it.
   books:
     hostPath: /mnt/nas-roms/Books
+    readOnly: false
+  # The audiobook library lives on the NAS (//192.168.0.2/public/audiobooks),
+  # a SIBLING of Books under the same CIFS share. It is mounted as its own
+  # bind rather than by mounting the share root, so the container only
+  # ever sees these two subdirectories.
+  #
+  # 36 GB, ~3,400 audio files, ~200 directories. Same uid=1000 forceuid
+  # mount as Books, so the app reads and writes it the same way.
+  audiobooks:
+    hostPath: /mnt/nas-roms/audiobooks
     readOnly: false
 
 # External exposure is handled by a Cloudflare Tunnel, not by Traefik.

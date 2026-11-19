@@ -5,5 +5,5 @@ type: application
 # Chart version. Flux resolves this chart from the existing GitRepository
 # source (sourceRef kind=GitRepository), so bumping this version is what
 # triggers a HelmRelease upgrade when the chart changes.
-version: 0.2.2
+version: 0.2.3
 appVersion: "3.8.0"
