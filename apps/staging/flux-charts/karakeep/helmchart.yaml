@@ -1,0 +1,14 @@
+# Sits in flux-system because this Flux version's HelmChart CRD has no
+# sourceRef.namespace field, so the HelmRepository must share its namespace.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmChart
+metadata:
+  name: karakeep
+  namespace: flux-system
+spec:
+  interval: 5m
+  chart: karakeep
+  version: "0.32.0"
+  sourceRef:
+    kind: HelmRepository
+    name: karakeep

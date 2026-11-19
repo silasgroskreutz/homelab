@@ -1,0 +1,11 @@
+# The official upstream Karakeep chart repository. The published chart
+# archive vendors its `common` and `meilisearch` subcharts, so no separate
+# dependency resolution step is needed on the Flux side.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: karakeep
+  namespace: flux-system
+spec:
+  interval: 24h
+  url: https://karakeep-app.github.io/helm-charts

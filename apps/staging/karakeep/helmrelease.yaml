@@ -1,0 +1,100 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: karakeep
+  namespace: karakeep
+spec:
+  interval: 10m
+  timeout: 10m
+  chartRef:
+    kind: HelmChart
+    name: karakeep
+    namespace: flux-system
+  # NEXTAUTH_SECRET and MEILI_MASTER_KEY are pulled out of the
+  # SOPS-encrypted Secret so the chart renders stable credentials instead of
+  # regenerating them on every upgrade.
+  valuesFrom:
+    - kind: Secret
+      name: karakeep-secret
+      valuesKey: NEXTAUTH_SECRET
+      targetPath: applicationSecretKey
+    - kind: Secret
+      name: karakeep-secret
+      valuesKey: MEILI_MASTER_KEY
+      targetPath: meilisearchMasterKey
+  install:
+    createNamespace: false
+    remediation:
+      retries: 3
+  upgrade:
+    cleanupOnFail: true
+    remediation:
+      retries: 3
+  driftDetection:
+    mode: enabled
+  values:
+    applicationProtocol: https
+    applicationHost: karakeep.silasgroskreutz.com
+    controllers:
+      karakeep:
+        type: statefulset
+        containers:
+          karakeep:
+            env:
+              # Inference stays on the LAN. If the Mac sleeps or drops off the
+              # network, AI tagging/summarization degrades; saving, browsing
+              # and search keep working.
+              AI_PROVIDER: ollama
+              OLLAMA_BASE_URL: "http://192.168.0.105:11434"
+              INFERENCE_TEXT_MODEL: "qwen3:8b"
+              AI_MODEL: "qwen3:8b"
+            resources:
+              requests:
+                cpu: 250m
+                memory: 512Mi
+              limits:
+                cpu: "2"
+                memory: 1536Mi
+        statefulset:
+          volumeClaimTemplates:
+            - name: data
+              accessMode: ReadWriteOnce
+              size: 10Gi
+              globalMounts:
+                - path: /data
+      chrome:
+        containers:
+          chrome:
+            # The upstream gcr.io/zenika-hub/alpine-chrome image can no longer
+            # be pulled (GCR requires billing). The Docker Hub image is the
+            # same build and is pullable on the cluster node.
+            image:
+              repository: docker.io/zenika/alpine-chrome
+              tag: "124"
+    meilisearch:
+      auth:
+        existingMasterKeySecret: karakeep-meilesearch
+      environment:
+        MEILI_ENV: production
+      persistence:
+        enabled: true
+        size: 5Gi
+    ingress:
+      karakeep:
+        className: traefik
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-prod
+          traefik.ingress.kubernetes.io/router.entrypoints: websecure
+          traefik.ingress.kubernetes.io/router.tls: "true"
+        hosts:
+          - host: karakeep.silasgroskreutz.com
+            paths:
+              - path: /
+                pathType: Prefix
+                service:
+                  identifier: karakeep
+                  port: http
+        tls:
+          - secretName: karakeep-tls
+            hosts:
+              - karakeep.silasgroskreutz.com
