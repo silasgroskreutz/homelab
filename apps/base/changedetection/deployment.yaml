@@ -45,7 +45,7 @@ spec:
           # Pinned to the multi-arch INDEX digest, so the deployment is
           # reproducible and stays correct on every node architecture.
           # linux/amd64 -> sha256:e423173747d6468b813df42ac5ec23991afffa27e933fbc4ad431861812eeca9
-          image: ghcr.io/dgtlmoon/changedetection.io@sha256:d25de0cd2119edd5e3f615a03bc40798ed2457e442ccb8b17c9ace78ac06cf44
+          image: ghcr.io/dgtlmoon/changedetection.io@sha256:b6aae2572a0bf1a671b1b202365ddcfe16a31fa8a60be89df606705731b55f8b
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5000
