@@ -10,4 +10,5 @@ resources:
   - cronjob-linkding.yaml
   - cronjob-navidrome.yaml
   - cronjob-bookorbit.yaml
+  - cronjob-karakeep.yaml
   - serviceaccount-bookorbit.yaml

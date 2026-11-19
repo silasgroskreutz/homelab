@@ -1,0 +1,84 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: karakeep-backup
+spec:
+  # 01:53 every day. Karakeep's artifacts are the bookmark database
+  # (a 2.3 MB SQLite file) and the assets tree (79 MB of uploaded
+  # images and PDFs).
+  #
+  # It sits between the Linkding job (00:37) and the BookOrbit job
+  # (02:17) and is clear of the changedetection (04:23) and navidrome
+  # (05:43) jobs. The odd minute keeps it off the on-the-hour spike.
+  schedule: "53 1 * * *"
+  timeZone: "America/Chicago"
+  # Forbid guards this job against itself.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            # Mandatory for the CIFS share, see the changedetection job.
+            runAsUser: 1000
+            runAsGroup: 0
+            fsGroup: 1000
+          containers:
+            - name: backup
+              image: 192.168.0.101:5000/homelab-backup@sha256:42b1e01087ed854d6130646b6765b668704ebc07e8ac9fd876cbbdc9d5d2e4e8
+              imagePullPolicy: IfNotPresent
+              # One pod, one schedule: the bookmark database and the
+              # assets tree are backed up back to back in the same job
+              # instead of in two jobs writing to the same share at the
+              # same minute.
+              command: ["python3", "/scripts/backup.py", "--config", "/scripts/config.json", "--only", "karakeep", "--only", "karakeep-assets"]
+              resources:
+                requests:
+                  cpu: 25m
+                  memory: 64Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              volumeMounts:
+                - name: nas
+                  mountPath: /backups
+                - name: datastore
+                  # Read-only: the backup must never write to the app's
+                  # live data.
+                  mountPath: /karakeep
+                  readOnly: true
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+          volumes:
+            - name: nas
+              hostPath:
+                path: /mnt/nas-roms
+                type: Directory
+            - name: datastore
+              # The Karakeep PVC lives in the `karakeep` namespace and a
+              # PVC can only be mounted by a pod in the SAME namespace as
+              # the claim. This CronJob lives in the dedicated `backup`
+              # namespace, so the PVC cannot be mounted directly.
+              #
+              # Single-node k3s, local-path provisioner: the volume lives
+              # in a directory on the node and is mounted here read-only.
+              # The path embeds the PVC's UID, so it changes if the PVC is
+              # recreated; the engine then fails loudly on the missing
+              # datastore instead of archiving an empty directory.
+              #
+              # Current value:
+              #   ./tools/backup/datastore-path.sh karakeep
+              hostPath:
+                path: /var/lib/rancher/k3s/storage/pvc-aa6cb771-6831-404c-84f2-7da5c41e4ebd_karakeep_data-karakeep-0
+                type: Directory
+            - name: scripts
+              configMap:
+                name: backup-scripts
+                defaultMode: 0444

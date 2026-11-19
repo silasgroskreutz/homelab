@@ -37,6 +37,7 @@ apps=(
   "linkding:linkding:linkding-data-pvc"
   "navidrome:navidrome:navidrome-data-pvc"
   "bookorbit:bookorbit:bookorbit-data"
+  "karakeep:karakeep:data-karakeep-0"
 )
 
 resolve() {

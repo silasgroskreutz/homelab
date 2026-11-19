@@ -100,6 +100,33 @@
         "compare_source_files": true
       },
       "_comment": "DECISION (t_fcb45e7b): the file-backed part of the Linkding data folder - assets/, favicons/ and previews/ - which is exactly what upstream's full_backup archives alongside the database. Upstream's full_backup does NOT archive tasks.sqlite3 (the huey task queue) and neither does this backup set: the card scopes Linkding to 'the complete application backup scope as defined by its own full_backup implementation', and the queue is transient state that the application rebuilds on start. The database is excluded from this archive because it is snapshotted properly by the sqlite kind above (a raw copy of a WAL database loses whatever is still in the WAL). secretkey.txt is excluded because it is Django's SECRET_KEY: a credential, and /mnt/nas-roms is a CIFS share that also holds Books, Movies and Music, not a secret store. Upstream excludes it too, and `manage.py generate_secret_key` writes a fresh one when the file is missing ('Generate secret key file if it does not exist'), so a restored instance comes up on its own key. allow_empty is set because all three directories are legitimately empty on this instance (measured: assets/, favicons/ and previews/ hold 0 files each) - failing the whole nightly job over an empty upload directory would be wrong - and compare_source_files still proves the archive matches the live tree as soon as it is not empty."
+    },
+    {
+      "name": "karakeep",
+      "kind": "sqlite",
+      "source": "/karakeep/db.db",
+      "keep": 3,
+      "verify": {
+        "integrity_check": true,
+        "compare_tables": [
+          "bookmarks",
+          "tagsOnBookmarks",
+          "assets",
+          "user"
+        ]
+      },
+      "_comment": "DECISION (karakeep migration): Karakeep's real state is one SQLite database (db.db) holding bookmarks, tags, AI tagging/summarization status, the user row and the apiKey table, plus a queue.db job queue and an assets/ tree of 509 uploaded files. The database is backed up with the SQLite online backup API because it runs in WAL mode and a plain file copy would miss everything still sitting in the -wal. compare_tables pins the four tables that carry the user's data. The apiKey table is deliberately NOT redacted: the key material is a SHA-256 hash and the plaintext only ever lives in the browser extension and the mobile app, so the table holds no usable secret."
+    },
+    {
+      "name": "karakeep-assets",
+      "kind": "tar",
+      "source": "/karakeep/assets",
+      "keep": 2,
+      "verify": {
+        "min_files": 100,
+        "compare_source_files": true
+      },
+      "_comment": "DECISION (karakeep migration): the assets tree is the 79 MB of uploaded images/PDFs that the bookmark rows reference. It is DERIVED from the uploads in principle, but the original files are not stored anywhere else - the assets/ directory on the PVC is the only copy - so it is backed up. keep=2 because of the size."
     }
   ]
 }
