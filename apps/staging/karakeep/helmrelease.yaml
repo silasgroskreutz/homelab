@@ -62,6 +62,13 @@ spec:
               SMTP_SECURE: "false"
               SMTP_USER: silasgroskreutz@icloud.com
               SMTP_FROM: silasgroskreutz@icloud.com
+              # This instance is reachable from the internet, so open
+              # self-service signup would let anyone in. Existing users and
+              # invited users are unaffected; new accounts come from the
+              # admin invite flow only. Requires SMTP to be working, which
+              # it now is.
+              DISABLE_SIGNUPS: "true"
+              EMAIL_VERIFICATION_REQUIRED: "true"
             resources:
               requests:
                 cpu: 250m
