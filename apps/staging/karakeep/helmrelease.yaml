@@ -104,7 +104,17 @@ spec:
           SMTP_PASSWORD: "{{ .Values.smtpPassword }}"
     meilisearch:
       auth:
-        existingMasterKeySecret: karakeep-meilisearch
+        # NOTE: the spelling here is deliberate and must match the chart's
+        # own secret key exactly. The upstream chart's values.yaml declares
+        # the secret under the key "meilesearch" (typo in upstream), which
+        # renders a Secret literally named "karakeep-meilesearch". The
+        # meilisearch subchart only renders its own master-key secret when
+        # existingMasterKeySecret is EMPTY, so when we point it at a secret
+        # it must point at the one the parent chart actually creates.
+        # Renaming this to the "correct" spelling karakeep-meilisearch
+        # leaves the pod referencing a secret that nothing renders -> the
+        # pod never goes Ready -> helm --wait times out -> upgrade fails.
+        existingMasterKeySecret: karakeep-meilesearch
       environment:
         MEILI_ENV: production
       persistence:
