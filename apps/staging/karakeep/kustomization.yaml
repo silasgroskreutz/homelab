@@ -7,3 +7,6 @@ resources:
   - helmrelease.yaml
   # SOPS-encrypted. Flux decrypts these with the cluster's age key.
   - secret.yaml
+  - tunnel-secret.yaml
+  # cloudflared Deployment + ConfigMap for the karakeep tunnel.
+  - cloudflare.yaml
