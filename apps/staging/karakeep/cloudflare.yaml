@@ -1,0 +1,75 @@
+# Cloudflare tunnel for karakeep.
+#
+# Mirrors the linkding pattern (apps/staging/linkding/cloudflare.yaml). The tunnel
+# itself is created in the Cloudflare dashboard or via the API with a token holding
+# Account > Cloudflare Tunnel: Edit. Its credentials land in a separate SOPS-encrypted
+# Secret named `tunnel-credentials` (see tunnel-secret.yaml).
+#
+# Why this exists: karakeep.silasgroskreutz.com is currently a plain DNS A record to
+# 192.168.0.101, so it only resolves inside the house. The Karakeep mobile app needs to
+# reach it over cellular. Every other public service here already runs through a tunnel.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudflared
+spec:
+  selector:
+    matchLabels:
+      app: cloudflared
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: cloudflared
+    spec:
+      containers:
+      - name: cloudflared
+        image: cloudflare/cloudflared:latest
+        args:
+        - tunnel
+        - --config
+        - /etc/cloudflared/config/config.yaml
+        - run
+        livenessProbe:
+          httpGet:
+            path: /ready
+            port: 2000
+          failureThreshold: 1
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        volumeMounts:
+        - name: config
+          mountPath: /etc/cloudflared/config
+          readOnly: true
+        - name: creds
+          mountPath: /etc/cloudflared/creds
+          readOnly: true
+      volumes:
+      - name: creds
+        secret:
+          secretName: tunnel-credentials
+      - name: config
+        configMap:
+          name: cloudflared
+          items:
+          - key: config.yaml
+            path: config.yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudflared
+data:
+  config.yaml: |
+    tunnel: karakeep
+
+    credentials-file: /etc/cloudflared/creds/credentials.json
+
+    metrics: 0.0.0.0:2000
+    no-autoupdate: true
+
+    ingress:
+    - hostname: karakeep.silasgroskreutz.com
+      service: http://karakeep:3000
+
+    - service: http_status:404
