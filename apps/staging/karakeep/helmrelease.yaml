@@ -22,6 +22,13 @@ spec:
       name: karakeep-secret
       valuesKey: MEILI_MASTER_KEY
       targetPath: meilisearchMasterKey
+    # iCloud SMTP app-specific password. Pulled out of the SOPS-encrypted
+    # Secret and injected as a secretKeyRef so it never appears in the
+    # StatefulSet spec or in plain-text Helm values.
+    - kind: Secret
+      name: karakeep-secret
+      valuesKey: SMTP_PASSWORD
+      targetPath: smtpPassword
   install:
     createNamespace: false
     remediation:
@@ -48,6 +55,13 @@ spec:
               OLLAMA_BASE_URL: "http://192.168.0.105:11434"
               INFERENCE_TEXT_MODEL: "qwen3:8b"
               AI_MODEL: "qwen3:8b"
+              # Outbound email via iCloud SMTP (app-specific password from
+              # karakeep-secret). Powers the "forgot password" reset flow.
+              SMTP_HOST: smtp.mail.me.com
+              SMTP_PORT: "587"
+              SMTP_SECURE: "false"
+              SMTP_USER: silasgroskreutz@icloud.com
+              SMTP_FROM: silasgroskreutz@icloud.com
             resources:
               requests:
                 cpu: 250m
@@ -71,9 +85,19 @@ spec:
             image:
               repository: docker.io/zenika/alpine-chrome
               tag: "124"
+    # The chart renders a Secret named "karakeep" from this map, and the
+    # karakeep container consumes it via envFrom — so anything listed here
+    # becomes an environment variable inside the pod. SMTP_PASSWORD comes
+    # from the SOPS-encrypted karakeep-secret via valuesFrom, so the plain
+    # text never appears in git or in the StatefulSet spec.
+    secrets:
+      karakeep:
+        enabled: true
+        stringData:
+          SMTP_PASSWORD: "{{ .Values.smtpPassword }}"
     meilisearch:
       auth:
-        existingMasterKeySecret: karakeep-meilesearch
+        existingMasterKeySecret: karakeep-meilisearch
       environment:
         MEILI_ENV: production
       persistence:
